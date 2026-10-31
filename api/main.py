@@ -531,8 +531,9 @@ body {
   top:0;
   z-index:20;
   gap:10px;
-  flex-wrap:wrap;
 }
+.logo { flex:0 0 auto; }
+.header-right { margin-left:auto; display:flex; align-items:center; }
 .logo {
   display:flex;
   align-items:center;
@@ -791,7 +792,9 @@ label {
 def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = False) -> str:
     if user:
         menu = f'''
-        <button class="hamburger" onclick="document.getElementById('menuPanel').classList.toggle('open');document.getElementById('menuOverlay').classList.toggle('open')">☰</button>
+        <div class="header-right">
+          <button class="hamburger" onclick="document.getElementById('menuPanel').classList.toggle('open');document.getElementById('menuOverlay').classList.toggle('open')">☰</button>
+        </div>
         <div class="menu-overlay" id="menuOverlay" onclick="document.getElementById('menuPanel').classList.remove('open');this.classList.remove('open')"></div>
         <div class="menu-panel" id="menuPanel">
           <a href="/dashboard">Dashboard</a>
@@ -1126,31 +1129,46 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
     db.add(df)
     db.commit()
 
-    # Basic extraction for PDFs
-    extracted = {}
-    if file.content_type == "application/pdf" or ext.lower() == ".pdf":
+    # Extract text and key fields from PDF
+    extracted = {"name": "", "doc_type": "other", "notes": "", "expiry": ""}
+    if ext.lower() == ".pdf":
         try:
             from pypdf import PdfReader
-            reader = PdfReader(str(path))
-            text = ""
-            for page in reader.pages[:5]:
-                text += page.extract_text() or ""
-            # Simple heuristics for insurance schedules
             import re
-            if "esure" in text.lower() or "home insurance" in text.lower():
+            reader = PdfReader(str(path))
+            full_text = ""
+            for page in reader.pages[:8]:
+                full_text += (page.extract_text() or "") + "\n"
+            low = full_text.lower()
+            if "home insurance" in low or "esure" in low:
                 extracted["doc_type"] = "Home Insurance"
-            pol = re.search(r"Policy number\s+(\d+)", text)
+                extracted["name"] = "Home insurance"
+            elif "car" in low or "motor" in low:
+                extracted["doc_type"] = "Car Insurance"
+                extracted["name"] = "Car insurance"
+            pol = re.search(r"(?:policy|policy number)\s*[:#]?\s*(\d{6,})", full_text, re.I)
             if pol:
-                extracted["notes"] = f"Policy {pol.group(1)}"
-            # Look for dates
-            dates = re.findall(r"\d{2}/\d{2}/\d{4}", text)
+                extracted["notes"] = f"Policy number: {pol.group(1)}"
+            # Prefer later dates as possible expiry
+            dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
             if dates:
-                extracted["possible_dates"] = dates[:3]
+                # take the last one as candidate expiry
+                d, m, y = dates[-1]
+                extracted["expiry"] = f"{y}-{m}-{d}"
+            print("EXTRACTED:", extracted)
         except Exception as e:
             print(f"PDF extract error: {e}")
 
-    # Store extraction briefly in query or session; for now redirect with file id
-    return RedirectResponse(f"/add?prefill_from={file_id}", status_code=302)
+    # Pass extracted via query params for prefill
+    from urllib.parse import urlencode
+    qs = urlencode({
+        "prefill_from": file_id,
+        "name": extracted["name"],
+        "doc_type": extracted["doc_type"],
+        "notes": extracted["notes"],
+        "expiry": extracted["expiry"],
+    })
+    return RedirectResponse(f"/add?{qs}", status_code=302)
 
 @app.get("/upgrade", response_class=HTMLResponse)
 def upgrade_page(request: Request, db: Session = Depends(get_db)):
@@ -1790,7 +1808,7 @@ def _group_options(user: User, db: Session, selected: Optional[str] = None) -> s
 
 
 @app.get("/add", response_class=HTMLResponse)
-def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None):
+def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None, name: str = "", doc_type: str = "", notes: str = "", expiry: str = ""):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
@@ -1799,7 +1817,12 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     if prefill_from:
         df = db.query(DocumentFile).filter(DocumentFile.id == prefill_from, DocumentFile.user_id == user.id).first()
         if df:
-            prefill_note = f'<p class="hint" style="background:#fff7ed;padding:10px;border-radius:8px;">Document uploaded: {html.escape(df.filename)}. Basic details extracted where possible — please review and complete the form.</p>'
+            prefill_note = f'<p class="hint" style="background:#fff7ed;padding:10px;border-radius:8px;">Document uploaded: {html.escape(df.filename)}. Extracted details below — please check and complete.</p>'
+
+    safe_name = html.escape(name or "")
+    safe_notes = html.escape(notes or "")
+    safe_expiry = html.escape(expiry or "")
+    safe_type = html.escape(doc_type or "insurance")
 
     type_fields_js = json.dumps({
         k: [{"key": a, "label": b, "type": c} for a, b, c in v]
@@ -1816,15 +1839,15 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
       <form method="post" action="/documents" id="docForm">
         <input type="hidden" name="linked_file_id" value="{prefill_from or ''}">
         <label>Name <span class="req">*</span></label>
-        <input name="name" placeholder="e.g. Car insurance" required>
+        <input name="name" value="{safe_name}" placeholder="e.g. Car insurance" required>
 
         <label>Type <span class="req">*</span></label>
         <select name="doc_type" id="docType" required onchange="updateExtraFields()">
-          {_type_options("insurance")}
+          {_type_options(safe_type)}
         </select>
 
         <label>Expiry date <span class="req">*</span></label>
-        <input name="expiry_date" type="date" required>
+        <input name="expiry_date" type="date" value="{safe_expiry}" required>
 
         <label>Remind me this many days before <span class="req">*</span></label>
         <input name="reminder_days" type="number" value="30" min="1" max="365" required>
@@ -1842,7 +1865,7 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
         <div id="extraFields"></div>
 
         <label>Notes</label>
-        <textarea name="notes" rows="3" placeholder="Optional notes"></textarea>
+        <textarea name="notes" rows="3" placeholder="Optional notes">{safe_notes}</textarea>
 
         <button type="submit">Save item</button>
       </form>
