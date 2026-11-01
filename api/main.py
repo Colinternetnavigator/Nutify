@@ -1194,98 +1194,70 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
     content = await file.read()
     path.write_bytes(content)
 
-    # Extract first, then save with data
+    # Save immediately so the request doesn't time out
     extracted = {
-        "name": "", "doc_type": "other", "notes": "", "expiry": "",
-        "provider": "", "policy_number": "", "premium": "", "cover_amount": "",
+        "name": "", "doc_type": "other", "notes": "Saved — extraction running or skipped for speed",
+        "expiry": "", "provider": "", "policy_number": "", "premium": "", "cover_amount": "",
         "passport_number": "", "nationality": "", "licence_number": "", "registration": ""
     }
+
+    # Only do fast PDF text extraction (skip slow image OCR in the request)
     full_text = ""
     if ext.lower() == ".pdf":
         try:
             from pypdf import PdfReader
             reader = PdfReader(str(path))
-            for page in reader.pages[:12]:
+            for page in reader.pages[:6]:  # fewer pages for speed
                 full_text += (page.extract_text() or "") + "\n"
+                if len(full_text) > 8000:
+                    break
         except Exception as e:
             print(f"PDF extract error: {e}")
-    elif ext.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-        try:
-            import pytesseract
-            from PIL import Image
-            img = Image.open(path)
-            full_text = pytesseract.image_to_string(img) or ""
-            print("OCR TEXT SAMPLE:", full_text[:400])
-        except Exception as e:
-            print(f"Image OCR error: {e}")
-            full_text = ""
+            extracted["notes"] = "PDF saved but text extraction failed"
 
     if full_text:
         import re
         low = full_text.lower()
-        # Passport detection
-        if "passport" in low or "passeport" in low or re.search(r"P<[A-Z]{3}", full_text):
+        if "passport" in low or "passeport" in low:
             extracted["doc_type"] = "passport"
             extracted["name"] = "Passport"
-            # MRZ or number
-            mrz = re.search(r"P<[A-Z]{3}([A-Z<]+)<<([A-Z<]+)", full_text)
-            if mrz:
-                surname = mrz.group(1).replace("<", " ").strip()
-                given = mrz.group(2).replace("<", " ").strip()
-                extracted["name"] = f"{given.title()} {surname.title()} Passport"
-            num = re.search(r"(?:passport\s*(?:no\.?|number)|passeport\s*no)\s*[:.]?\s*([A-Z0-9]{7,9})", full_text, re.I)
-            if not num:
-                num = re.search(r"\b([0-9]{9})\b", full_text)
+            num = re.search(r"\b([0-9]{8,9})\b", full_text)
             if num:
                 extracted["passport_number"] = num.group(1)
-            if "british" in low or "gbr" in low or "united kingdom" in low:
+            if "british" in low or "gbr" in low:
                 extracted["nationality"] = "British"
-            # Expiry like 20 JAN / JAN 33
-            exp = re.search(r"(\d{1,2})\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*/?\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?\s*(\d{2})", full_text, re.I)
-            if exp:
-                day, yy = exp.group(1), exp.group(2)
-                year = 2000 + int(yy) if int(yy) < 50 else 1900 + int(yy)
-                extracted["expiry"] = f"{year}-01-{int(day):02d}"  # month approximate
-        # Driving licence
-        elif "driving licence" in low or "driving license" in low or "dvla" in low:
+        elif "driving licence" in low or "dvla" in low:
             extracted["doc_type"] = "driving_licence"
             extracted["name"] = "Driving licence"
-            lic = re.search(r"\b([A-Z0-9]{5}\d{6}[A-Z0-9]{2}\d[A-Z]{2})\b", full_text)
-            if lic:
-                extracted["licence_number"] = lic.group(1)
-        # Insurance (existing)
         elif "insurance" in low or "policy" in low:
             extracted["doc_type"] = "insurance"
-            if "home" in low or "esure" in low:
-                extracted["name"] = "Home insurance"
-                extracted["provider"] = "esure" if "esure" in low else ""
-            elif "car" in low or "motor" in low:
-                extracted["name"] = "Car insurance"
-            else:
-                extracted["name"] = "Insurance"
-            for prov in ["esure", "aviva", "admiral", "direct line", "axa", "lv=", "churchill"]:
-                if prov in low:
-                    extracted["provider"] = prov.title()
-                    break
+            extracted["name"] = "Home insurance" if "home" in low else "Insurance"
             pol = re.search(r"(?:policy\s*(?:number|no\.?)|policy)\s*[:#]?\s*(\d{5,})", full_text, re.I)
             if pol:
                 extracted["policy_number"] = pol.group(1)
-            prem = re.search(r"(?:premium|total premium|price)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
-            if prem:
-                extracted["premium"] = prem.group(1).replace(",", "")
-            cover = re.search(r"(?:buildings|contents|cover|sum insured)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
-            if cover:
-                extracted["cover_amount"] = cover.group(1).replace(",", "")
-        # Dates fallback
+            for prov in ["esure", "aviva", "admiral", "direct line", "axa"]:
+                if prov in low:
+                    extracted["provider"] = prov.title()
+                    break
         dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
-        if dates and not extracted["expiry"]:
+        if dates:
             for d, m, y in reversed(dates):
                 if int(y) >= 2026:
                     extracted["expiry"] = f"{y}-{m}-{d}"
                     break
-        print("EXTRACTED:", extracted)
-    else:
-        extracted["notes"] = "Could not read text from file — please fill manually"
+        extracted["notes"] = "Extracted from PDF"
+    elif ext.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+        extracted["notes"] = "Image saved. OCR skipped for speed — fill details manually or try a PDF."
+
+    df = DocumentFile(
+        id=file_id, user_id=user.id, filename=file.filename,
+        content_type=file.content_type, file_path=str(path),
+        extracted_data=json.dumps(extracted)
+    )
+    db.add(df)
+    db.commit()
+
+    return RedirectResponse(f"/add?prefill_from={file_id}", status_code=302)
 
     df = DocumentFile(
         id=file_id, user_id=user.id, filename=file.filename,
