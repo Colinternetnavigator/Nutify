@@ -6,3 +6,6 @@ python-multipart
 pywebpush==2.0.0
 python-dotenv==1.0.1
 pypdf
+pytesseract
+pillow
+
