@@ -1090,7 +1090,30 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
     files = db.query(DocumentFile).filter(DocumentFile.user_id == user.id).order_by(DocumentFile.created_at.desc()).all()
     rows = ""
     for f in files:
-        rows += f'<div class="doc-row"><div><strong>{html.escape(f.filename)}</strong><div class="meta">{f.created_at.strftime("%d %b %Y")}</div></div><a href="/documents/{f.id}/download" class="btn btn-outline btn-sm">Download</a></div>'
+        item_name = ""
+        if f.document_id:
+            doc = db.query(Document).filter(Document.id == f.document_id).first()
+            if doc:
+                item_name = html.escape(doc.name)
+        if not item_name and f.extracted_data:
+            try:
+                data = json.loads(f.extracted_data)
+                item_name = html.escape(data.get("name") or "")
+            except Exception:
+                pass
+        rows += f'''
+        <div class="doc-row">
+          <div>
+            <strong>{html.escape(f.filename)}</strong>
+            <div class="meta">{f.created_at.strftime("%d %b %Y")}</div>
+            {f'<div class="meta">Item: {item_name}</div>' if item_name else ''}
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0;">
+            <a href="/documents/{f.id}/view" class="btn btn-outline btn-sm" target="_blank">View</a>
+            <a href="/documents/{f.id}/rename" class="btn btn-outline btn-sm">Rename</a>
+            <a href="/documents/{f.id}/download" class="btn btn-outline btn-sm">Download</a>
+          </div>
+        </div>'''
     body = f"""
     <div class="card">
       <h2>My documents</h2>
@@ -1098,6 +1121,42 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
     </div>
     """
     return page("My documents", body, user, show_fab=True)
+
+@app.get("/documents/{file_id}/view")
+def view_document(file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
+    if not df or not Path(df.file_path).exists():
+        raise HTTPException(404)
+    return FileResponse(df.file_path, media_type=df.content_type or "application/octet-stream")
+
+@app.get("/documents/{file_id}/rename", response_class=HTMLResponse)
+def rename_document_page(file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
+    if not df:
+        raise HTTPException(404)
+    body = f"""
+    <div class="card" style="max-width:420px;margin:20px auto;">
+      <h2>Rename document</h2>
+      <form method="post" action="/documents/{file_id}/rename">
+        <label>New name</label>
+        <input name="filename" value="{html.escape(df.filename)}" required>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+    """
+    return page("Rename document", body, user)
+
+@app.post("/documents/{file_id}/rename")
+def rename_document(file_id: str, filename: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
+    if not df:
+        raise HTTPException(404)
+    df.filename = filename.strip() or df.filename
+    db.commit()
+    return RedirectResponse("/documents", status_code=302)
 
 
 @app.get("/documents/{file_id}/download")
@@ -1136,25 +1195,43 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
     path.write_bytes(content)
 
     # Extract first, then save with data
-    extracted = {"name": "", "doc_type": "insurance", "notes": "", "expiry": ""}
+    extracted = {
+        "name": "", "doc_type": "insurance", "notes": "", "expiry": "",
+        "provider": "", "policy_number": "", "premium": "", "cover_amount": ""
+    }
     if ext.lower() == ".pdf":
         try:
             from pypdf import PdfReader
             import re
             reader = PdfReader(str(path))
             full_text = ""
-            for page in reader.pages[:10]:
+            for page in reader.pages[:12]:
                 full_text += (page.extract_text() or "") + "\n"
             low = full_text.lower()
             if "home insurance" in low or "esure" in low:
                 extracted["name"] = "Home insurance"
+                extracted["provider"] = "esure"
             elif "car" in low or "motor" in low or "vehicle" in low:
                 extracted["name"] = "Car insurance"
             else:
                 extracted["name"] = "Insurance"
+            # Provider from common insurers
+            for prov in ["esure", "aviva", "admiral", "direct line", "axa", "lv=", "churchill", "more than"]:
+                if prov in low:
+                    extracted["provider"] = prov.title()
+                    break
             pol = re.search(r"(?:policy\s*(?:number|no\.?)|policy)\s*[:#]?\s*(\d{5,})", full_text, re.I)
             if pol:
+                extracted["policy_number"] = pol.group(1)
                 extracted["notes"] = f"Policy number: {pol.group(1)}"
+            # Premium / cost
+            prem = re.search(r"(?:premium|total premium|price|cost)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
+            if prem:
+                extracted["premium"] = prem.group(1).replace(",", "")
+            # Cover amount
+            cover = re.search(r"(?:buildings|contents|cover|sum insured)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
+            if cover:
+                extracted["cover_amount"] = cover.group(1).replace(",", "")
             dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
             for d, m, y in reversed(dates):
                 if int(y) >= 2026:
@@ -1837,8 +1914,18 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
                     doc_type = data.get("doc_type") or "insurance"
                     notes = data.get("notes") or ""
                     expiry = data.get("expiry") or ""
+                    provider = data.get("provider") or ""
+                    policy_number = data.get("policy_number") or ""
+                    premium = data.get("premium") or ""
+                    cover_amount = data.get("cover_amount") or ""
                 except Exception:
-                    pass
+                    provider = policy_number = premium = cover_amount = ""
+            else:
+                provider = policy_number = premium = cover_amount = ""
+        else:
+            provider = policy_number = premium = cover_amount = ""
+    else:
+        provider = policy_number = premium = cover_amount = ""
 
     safe_name = html.escape(name)
     safe_notes = html.escape(notes)
@@ -1894,6 +1981,13 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     <script>
     const TYPE_FIELDS = {type_fields_js};
 
+    const PREFILL = {{
+      provider: {json.dumps(provider)},
+      policy_number: {json.dumps(policy_number)},
+      premium: {json.dumps(premium)},
+      cover_amount: {json.dumps(cover_amount)}
+    }};
+
     function updateExtraFields() {{
       const t = document.getElementById('docType').value;
       const fields = TYPE_FIELDS[t] || [];
@@ -1903,11 +1997,12 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
         html = '<div class="optional-box"><p class="hint" style="margin-top:0;">Optional fields for this type</p>';
 
         fields.forEach(f => {{
+          const val = PREFILL[f.key] || '';
           if (f.type === 'checkbox') {{
             html += `<label style="display:flex;align-items:center;gap:8px;font-weight:500;">
               <input type="checkbox" name="extra_${{f.key}}" value="true" style="width:auto;margin:0;"> ${{f.label}}</label>`;
           }} else {{
-            html += `<label>${{f.label}}</label><input name="extra_${{f.key}}">`;
+            html += `<label>${{f.label}}</label><input name="extra_${{f.key}}" value="${{val}}">`;
           }}
         }});
 
