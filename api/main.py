@@ -1141,11 +1141,14 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
                 full_text += (page.extract_text() or "") + "\n"
             low = full_text.lower()
             if "home insurance" in low or "esure" in low:
-                extracted["doc_type"] = "Home Insurance"
+                extracted["doc_type"] = "insurance"
                 extracted["name"] = "Home insurance"
             elif "car" in low or "motor" in low:
-                extracted["doc_type"] = "Car Insurance"
+                extracted["doc_type"] = "insurance"
                 extracted["name"] = "Car insurance"
+            else:
+                extracted["doc_type"] = "insurance"
+                extracted["name"] = "Insurance"
             pol = re.search(r"(?:policy|policy number)\s*[:#]?\s*(\d{6,})", full_text, re.I)
             if pol:
                 extracted["notes"] = f"Policy number: {pol.group(1)}"
