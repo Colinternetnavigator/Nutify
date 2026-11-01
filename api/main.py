@@ -256,6 +256,7 @@ class DocumentFile(Base):
     filename = Column(String, nullable=False)
     content_type = Column(String, nullable=True)
     file_path = Column(String, nullable=False)
+    extracted_data = Column(Text, nullable=True)  # JSON of prefill fields
     created_at = Column(DateTime, default=func.now())
     user = relationship("User")
     document = relationship("Document")
@@ -277,6 +278,15 @@ Base.metadata.create_all(bind=engine)
 def ensure_schema():
     """Safely add fields to existing SQLite/Postgres databases."""
     inspector = inspect(engine)
+
+    if inspector.has_table("document_files"):
+        cols = [c["name"] for c in inspector.get_columns("document_files")]
+        if "extracted_data" not in cols:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE document_files ADD COLUMN extracted_data TEXT"))
+            except Exception as exc:
+                print(f"Could not add document_files.extracted_data: {exc}")
 
     if inspector.has_table("documents"):
         cols = [c["name"] for c in inspector.get_columns("documents")]
@@ -1125,53 +1135,48 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
     content = await file.read()
     path.write_bytes(content)
 
-    df = DocumentFile(id=file_id, user_id=user.id, filename=file.filename, content_type=file.content_type, file_path=str(path))
-    db.add(df)
-    db.commit()
-
-    # Extract text and key fields from PDF
-    extracted = {"name": "", "doc_type": "other", "notes": "", "expiry": ""}
+    # Extract first, then save with data
+    extracted = {"name": "", "doc_type": "insurance", "notes": "", "expiry": ""}
     if ext.lower() == ".pdf":
         try:
             from pypdf import PdfReader
             import re
             reader = PdfReader(str(path))
             full_text = ""
-            for page in reader.pages[:8]:
+            for page in reader.pages[:10]:
                 full_text += (page.extract_text() or "") + "\n"
             low = full_text.lower()
             if "home insurance" in low or "esure" in low:
-                extracted["doc_type"] = "insurance"
                 extracted["name"] = "Home insurance"
-            elif "car" in low or "motor" in low:
-                extracted["doc_type"] = "insurance"
+            elif "car" in low or "motor" in low or "vehicle" in low:
                 extracted["name"] = "Car insurance"
             else:
-                extracted["doc_type"] = "insurance"
                 extracted["name"] = "Insurance"
-            pol = re.search(r"(?:policy|policy number)\s*[:#]?\s*(\d{6,})", full_text, re.I)
+            pol = re.search(r"(?:policy\s*(?:number|no\.?)|policy)\s*[:#]?\s*(\d{5,})", full_text, re.I)
             if pol:
                 extracted["notes"] = f"Policy number: {pol.group(1)}"
-            # Prefer later dates as possible expiry
             dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
-            if dates:
-                # take the last one as candidate expiry
+            for d, m, y in reversed(dates):
+                if int(y) >= 2026:
+                    extracted["expiry"] = f"{y}-{m}-{d}"
+                    break
+            if not extracted["expiry"] and dates:
                 d, m, y = dates[-1]
                 extracted["expiry"] = f"{y}-{m}-{d}"
             print("EXTRACTED:", extracted)
         except Exception as e:
             print(f"PDF extract error: {e}")
+            extracted["notes"] = "Extraction failed — please fill manually"
 
-    # Pass extracted via query params for prefill
-    from urllib.parse import urlencode
-    qs = urlencode({
-        "prefill_from": file_id,
-        "name": extracted["name"],
-        "doc_type": extracted["doc_type"],
-        "notes": extracted["notes"],
-        "expiry": extracted["expiry"],
-    })
-    return RedirectResponse(f"/add?{qs}", status_code=302)
+    df = DocumentFile(
+        id=file_id, user_id=user.id, filename=file.filename,
+        content_type=file.content_type, file_path=str(path),
+        extracted_data=json.dumps(extracted)
+    )
+    db.add(df)
+    db.commit()
+
+    return RedirectResponse(f"/add?prefill_from={file_id}", status_code=302)
 
 @app.get("/upgrade", response_class=HTMLResponse)
 def upgrade_page(request: Request, db: Session = Depends(get_db)):
@@ -1811,21 +1816,34 @@ def _group_options(user: User, db: Session, selected: Optional[str] = None) -> s
 
 
 @app.get("/add", response_class=HTMLResponse)
-def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None, name: str = "", doc_type: str = "", notes: str = "", expiry: str = ""):
+def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
 
     prefill_note = ""
+    name = ""
+    doc_type = "insurance"
+    notes = ""
+    expiry = ""
     if prefill_from:
         df = db.query(DocumentFile).filter(DocumentFile.id == prefill_from, DocumentFile.user_id == user.id).first()
         if df:
             prefill_note = f'<p class="hint" style="background:#fff7ed;padding:10px;border-radius:8px;">Document uploaded: {html.escape(df.filename)}. Extracted details below — please check and complete.</p>'
+            if df.extracted_data:
+                try:
+                    data = json.loads(df.extracted_data)
+                    name = data.get("name") or ""
+                    doc_type = data.get("doc_type") or "insurance"
+                    notes = data.get("notes") or ""
+                    expiry = data.get("expiry") or ""
+                except Exception:
+                    pass
 
-    safe_name = html.escape(name or "")
-    safe_notes = html.escape(notes or "")
-    safe_expiry = html.escape(expiry or "")
-    safe_type = html.escape(doc_type or "insurance")
+    safe_name = html.escape(name)
+    safe_notes = html.escape(notes)
+    safe_expiry = html.escape(expiry)
+    safe_type = html.escape(doc_type)
 
     type_fields_js = json.dumps({
         k: [{"key": a, "label": b, "type": c} for a, b, c in v]
