@@ -1196,54 +1196,96 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
 
     # Extract first, then save with data
     extracted = {
-        "name": "", "doc_type": "insurance", "notes": "", "expiry": "",
-        "provider": "", "policy_number": "", "premium": "", "cover_amount": ""
+        "name": "", "doc_type": "other", "notes": "", "expiry": "",
+        "provider": "", "policy_number": "", "premium": "", "cover_amount": "",
+        "passport_number": "", "nationality": "", "licence_number": "", "registration": ""
     }
+    full_text = ""
     if ext.lower() == ".pdf":
         try:
             from pypdf import PdfReader
-            import re
             reader = PdfReader(str(path))
-            full_text = ""
             for page in reader.pages[:12]:
                 full_text += (page.extract_text() or "") + "\n"
-            low = full_text.lower()
-            if "home insurance" in low or "esure" in low:
+        except Exception as e:
+            print(f"PDF extract error: {e}")
+    elif ext.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+        try:
+            import pytesseract
+            from PIL import Image
+            img = Image.open(path)
+            full_text = pytesseract.image_to_string(img) or ""
+            print("OCR TEXT SAMPLE:", full_text[:400])
+        except Exception as e:
+            print(f"Image OCR error: {e}")
+            full_text = ""
+
+    if full_text:
+        import re
+        low = full_text.lower()
+        # Passport detection
+        if "passport" in low or "passeport" in low or re.search(r"P<[A-Z]{3}", full_text):
+            extracted["doc_type"] = "passport"
+            extracted["name"] = "Passport"
+            # MRZ or number
+            mrz = re.search(r"P<[A-Z]{3}([A-Z<]+)<<([A-Z<]+)", full_text)
+            if mrz:
+                surname = mrz.group(1).replace("<", " ").strip()
+                given = mrz.group(2).replace("<", " ").strip()
+                extracted["name"] = f"{given.title()} {surname.title()} Passport"
+            num = re.search(r"(?:passport\s*(?:no\.?|number)|passeport\s*no)\s*[:.]?\s*([A-Z0-9]{7,9})", full_text, re.I)
+            if not num:
+                num = re.search(r"\b([0-9]{9})\b", full_text)
+            if num:
+                extracted["passport_number"] = num.group(1)
+            if "british" in low or "gbr" in low or "united kingdom" in low:
+                extracted["nationality"] = "British"
+            # Expiry like 20 JAN / JAN 33
+            exp = re.search(r"(\d{1,2})\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*/?\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?\s*(\d{2})", full_text, re.I)
+            if exp:
+                day, yy = exp.group(1), exp.group(2)
+                year = 2000 + int(yy) if int(yy) < 50 else 1900 + int(yy)
+                extracted["expiry"] = f"{year}-01-{int(day):02d}"  # month approximate
+        # Driving licence
+        elif "driving licence" in low or "driving license" in low or "dvla" in low:
+            extracted["doc_type"] = "driving_licence"
+            extracted["name"] = "Driving licence"
+            lic = re.search(r"\b([A-Z0-9]{5}\d{6}[A-Z0-9]{2}\d[A-Z]{2})\b", full_text)
+            if lic:
+                extracted["licence_number"] = lic.group(1)
+        # Insurance (existing)
+        elif "insurance" in low or "policy" in low:
+            extracted["doc_type"] = "insurance"
+            if "home" in low or "esure" in low:
                 extracted["name"] = "Home insurance"
-                extracted["provider"] = "esure"
-            elif "car" in low or "motor" in low or "vehicle" in low:
+                extracted["provider"] = "esure" if "esure" in low else ""
+            elif "car" in low or "motor" in low:
                 extracted["name"] = "Car insurance"
             else:
                 extracted["name"] = "Insurance"
-            # Provider from common insurers
-            for prov in ["esure", "aviva", "admiral", "direct line", "axa", "lv=", "churchill", "more than"]:
+            for prov in ["esure", "aviva", "admiral", "direct line", "axa", "lv=", "churchill"]:
                 if prov in low:
                     extracted["provider"] = prov.title()
                     break
             pol = re.search(r"(?:policy\s*(?:number|no\.?)|policy)\s*[:#]?\s*(\d{5,})", full_text, re.I)
             if pol:
                 extracted["policy_number"] = pol.group(1)
-                extracted["notes"] = f"Policy number: {pol.group(1)}"
-            # Premium / cost
-            prem = re.search(r"(?:premium|total premium|price|cost)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
+            prem = re.search(r"(?:premium|total premium|price)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
             if prem:
                 extracted["premium"] = prem.group(1).replace(",", "")
-            # Cover amount
             cover = re.search(r"(?:buildings|contents|cover|sum insured)\s*[:£]?\s*£?\s*([\d,]+\.?\d*)", full_text, re.I)
             if cover:
                 extracted["cover_amount"] = cover.group(1).replace(",", "")
-            dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
+        # Dates fallback
+        dates = re.findall(r"(\d{2})/(\d{2})/(\d{4})", full_text)
+        if dates and not extracted["expiry"]:
             for d, m, y in reversed(dates):
                 if int(y) >= 2026:
                     extracted["expiry"] = f"{y}-{m}-{d}"
                     break
-            if not extracted["expiry"] and dates:
-                d, m, y = dates[-1]
-                extracted["expiry"] = f"{y}-{m}-{d}"
-            print("EXTRACTED:", extracted)
-        except Exception as e:
-            print(f"PDF extract error: {e}")
-            extracted["notes"] = "Extraction failed — please fill manually"
+        print("EXTRACTED:", extracted)
+    else:
+        extracted["notes"] = "Could not read text from file — please fill manually"
 
     df = DocumentFile(
         id=file_id, user_id=user.id, filename=file.filename,
@@ -1918,14 +1960,22 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
                     policy_number = data.get("policy_number") or ""
                     premium = data.get("premium") or ""
                     cover_amount = data.get("cover_amount") or ""
+                    passport_number = data.get("passport_number") or ""
+                    nationality = data.get("nationality") or ""
+                    licence_number = data.get("licence_number") or ""
+                    registration = data.get("registration") or ""
                 except Exception:
                     provider = policy_number = premium = cover_amount = ""
+                    passport_number = nationality = licence_number = registration = ""
             else:
                 provider = policy_number = premium = cover_amount = ""
+                passport_number = nationality = licence_number = registration = ""
         else:
             provider = policy_number = premium = cover_amount = ""
+            passport_number = nationality = licence_number = registration = ""
     else:
         provider = policy_number = premium = cover_amount = ""
+        passport_number = nationality = licence_number = registration = ""
 
     safe_name = html.escape(name)
     safe_notes = html.escape(notes)
@@ -1985,7 +2035,11 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
       provider: {json.dumps(provider)},
       policy_number: {json.dumps(policy_number)},
       premium: {json.dumps(premium)},
-      cover_amount: {json.dumps(cover_amount)}
+      cover_amount: {json.dumps(cover_amount)},
+      passport_number: {json.dumps(passport_number)},
+      nationality: {json.dumps(nationality)},
+      licence_number: {json.dumps(licence_number)},
+      registration: {json.dumps(registration)}
     }};
 
     function updateExtraFields() {{
