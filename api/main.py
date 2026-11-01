@@ -807,12 +807,12 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
         </div>
         <div class="menu-overlay" id="menuOverlay" onclick="document.getElementById('menuPanel').classList.remove('open');this.classList.remove('open')"></div>
         <div class="menu-panel" id="menuPanel">
-          <a href="/dashboard">Dashboard</a>
-          <a href="/groups">Groups</a>
-          <a href="/documents">My documents</a>
-          <a href="/upgrade">Upgrade</a>
-          <a href="/account">My account</a>
-          <a href="/logout">Logout</a>
+          <a href="/dashboard">📋 Dashboard</a>
+          <a href="/groups">📁 Groups</a>
+          <a href="/documents">📄 My documents</a>
+          <a href="/upgrade">⭐ Upgrade</a>
+          <a href="/account">👤 My account</a>
+          <a href="/logout">🚪 Logout</a>
         </div>
         '''
         fab = '''
@@ -1101,10 +1101,11 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
                 item_name = html.escape(data.get("name") or "")
             except Exception:
                 pass
+        short_name = html.escape(f.filename[:28] + "…" if len(f.filename) > 28 else f.filename)
         rows += f'''
         <div class="doc-row">
-          <div>
-            <strong>{html.escape(f.filename)}</strong>
+          <div style="min-width:0;flex:1;">
+            <strong title="{html.escape(f.filename)}">{short_name}</strong>
             <div class="meta">{f.created_at.strftime("%d %b %Y")}</div>
             {f'<div class="meta">Item: {item_name}</div>' if item_name else ''}
           </div>
@@ -1112,6 +1113,7 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
             <a href="/documents/{f.id}/view" class="btn btn-outline btn-sm" target="_blank">View</a>
             <a href="/documents/{f.id}/rename" class="btn btn-outline btn-sm">Rename</a>
             <a href="/documents/{f.id}/download" class="btn btn-outline btn-sm">Download</a>
+            <button onclick="if(confirm('Delete this document?')) location.href='/documents/{f.id}/delete'" class="btn btn-danger btn-sm">Delete</button>
           </div>
         </div>'''
     body = f"""
@@ -1166,6 +1168,19 @@ def download_document(file_id: str, request: Request, db: Session = Depends(get_
     if not df or not Path(df.file_path).exists():
         raise HTTPException(404)
     return FileResponse(df.file_path, filename=df.filename)
+
+@app.get("/documents/{file_id}/delete")
+def delete_document(file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
+    if df:
+        try:
+            Path(df.file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        db.delete(df)
+        db.commit()
+    return RedirectResponse("/documents", status_code=302)
 
 @app.get("/add-from-document", response_class=HTMLResponse)
 def add_from_doc_page(request: Request, db: Session = Depends(get_db)):
@@ -1247,7 +1262,8 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
                     break
         extracted["notes"] = "Extracted from PDF"
     elif ext.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-        extracted["notes"] = "Image saved. OCR skipped for speed — fill details manually or try a PDF."
+        extracted["notes"] = ""
+        extracted["autofill_failed"] = True
 
     df = DocumentFile(
         id=file_id, user_id=user.id, filename=file.filename,
@@ -1667,8 +1683,7 @@ def groups_page(request: Request, db: Session = Depends(get_db)):
               <select name="color" aria-label="Group colour">{color_opts}</select>
               <button type="submit" class="btn-sm" style="width:auto;">Save</button>
             </form>
-            <form method="post" action="/groups/{g.id}/subgroup" style="margin-top:8px;" class="form-row">
-              <input name="name" placeholder="New subgroup name" required>
+
               <button type="submit" class="btn-sm" style="width:auto;">Add subgroup</button>
             </form>
             <form method="post" action="/groups/{g.id}/share" style="margin-top:8px;" class="form-row">
@@ -1994,6 +2009,11 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
 
         <div id="extraFields"></div>
 
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;margin:12px 0;">
+          <input type="checkbox" name="renewal_help" value="true" style="width:auto;margin:0;">
+          Help me with renewal closer to the time (prices, links, etc.)
+        </label>
+
         <label>Notes</label>
         <textarea name="notes" rows="3" placeholder="Optional notes">{safe_notes}</textarea>
 
@@ -2039,6 +2059,10 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     }}
 
     updateExtraFields();
+    const params = new URLSearchParams(location.search);
+    if (params.get("prefill_from")) {{
+      alert("Could not auto-fill from this file. Please fill in the details manually.");
+    }}
     </script>
     """
     return page("Add item", body, user)
