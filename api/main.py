@@ -496,6 +496,14 @@ app = FastAPI(title="Nutify")
 
 
 # Support either "static" or "Static" for the logo directory.
+@app.get("/static/{filename}")
+def static_file(filename: str):
+    for base in [Path("static"), Path("Static"), Path(__file__).resolve().parent / "static", Path(__file__).resolve().parent / "Static"]:
+        p = base / filename
+        if p.exists():
+            return FileResponse(p)
+    raise HTTPException(404)
+
 @app.get("/brand-logo")
 def brand_logo():
     candidates = [
@@ -807,7 +815,8 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
         </div>
         <div class="menu-overlay" id="menuOverlay" onclick="document.getElementById('menuPanel').classList.remove('open');this.classList.remove('open')"></div>
         <div class="menu-panel" id="menuPanel">
-          <a href="/dashboard">📋 Dashboard</a>
+          <a href="/dashboard">🏠 Dashboard</a>
+          <a href="/reminders">📋 Reminders</a>
           <a href="/groups">📁 Groups</a>
           <a href="/documents">📄 My documents</a>
           <a href="/upgrade">⭐ Upgrade</a>
@@ -892,6 +901,7 @@ def home(request: Request, db: Session = Depends(get_db)):
 
     body = """
     <div class="card" style="text-align:center;padding:40px 20px;">
+      <img src="/static/ScoutThumb.png" alt="Nutify" style="max-width:220px;margin-bottom:16px;" onerror="this.style.display='none'">
       <h1>Make renewals less of a worry.</h1>
       <p class="hint">Keep track of passports, insurance, MOTs, subscriptions and more. Organise everything, share with family, and get reminders before things expire.</p>
       <a href="/register" class="btn btn-primary" style="width:auto;padding:14px 28px;">Get started free</a>
@@ -1328,7 +1338,42 @@ def account_page(request: Request, db: Session = Depends(get_db)):
     return page("Account", body, user)
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request, db: Session = Depends(get_db), view: str = "list", month: str = None):
+def dashboard_overview(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    if not user:
+        return RedirectResponse("/login")
+    today = date.today()
+    docs = get_accessible_documents(user, db)
+    total = len(docs)
+    expired = [d for d in docs if d.expiry_date.date() < today]
+    upcoming = sorted([d for d in docs if d.expiry_date.date() >= today], key=lambda d: d.expiry_date)[:5]
+    recent_expired = sorted(expired, key=lambda d: d.expiry_date, reverse=True)[:5]
+
+    def row(d):
+        days = (d.expiry_date.date() - today).days
+        status = f"Expired {abs(days)}d ago" if days < 0 else f"Due in {days}d"
+        return f'<div class="doc-row"><div><strong>{html.escape(d.name)}</strong><div class="meta">{html.escape(d.doc_type)}</div></div><span class="{"expiry-soon" if days < 7 else "expiry-ok"}">{status}</span></div>'
+
+    body = f"""
+    <h2>Dashboard</h2>
+    <div class="card">
+      <p><strong>Total reminders:</strong> {total}</p>
+      <p><strong>Expired:</strong> {len(expired)}</p>
+      <p><strong>Upcoming:</strong> {total - len(expired)}</p>
+    </div>
+    <div class="card">
+      <h3>Next due</h3>
+      {''.join(row(d) for d in upcoming) or '<p class="hint">Nothing upcoming.</p>'}
+    </div>
+    <div class="card">
+      <h3>Recently expired</h3>
+      {''.join(row(d) for d in recent_expired) or '<p class="hint">No expired items.</p>'}
+    </div>
+    """
+    return page("Dashboard", body, user, show_fab=True)
+
+@app.get("/reminders", response_class=HTMLResponse)
+def reminders(request: Request, db: Session = Depends(get_db), view: str = "list", month: str = None):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
@@ -1449,9 +1494,9 @@ def dashboard(request: Request, db: Session = Depends(get_db), view: str = "list
         next_month_str = next_m.strftime("%Y-%m")
         nav = f"""
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <a href="/dashboard?view=calendar&month={prev_month_str}" class="btn btn-outline btn-sm">← Prev</a>
+          <a href="/reminders?view=calendar&month={prev_month_str}" class="btn btn-outline btn-sm">← Prev</a>
           <h3 style="margin:0;">{first.strftime("%B %Y")}</h3>
-          <a href="/dashboard?view=calendar&month={next_month_str}" class="btn btn-outline btn-sm">Next →</a>
+          <a href="/reminders?view=calendar&month={next_month_str}" class="btn btn-outline btn-sm">Next →</a>
         </div>
         """
 
@@ -1621,15 +1666,15 @@ def dashboard(request: Request, db: Session = Depends(get_db), view: str = "list
     cal_active = "active" if view == "calendar" else ""
 
     body = f"""
-    <h2>Dashboard</h2>
+    <h2>Reminders</h2>
     {push_btn}
     <div class="view-tabs">
-      <a href="/dashboard?view=list" class="{list_active}">List</a>
-      <a href="/dashboard?view=calendar" class="{cal_active}">Calendar</a>
+      <a href="/reminders?view=list" class="{list_active}">List</a>
+      <a href="/reminders?view=calendar" class="{cal_active}">Calendar</a>
     </div>
     {list_html if view == "list" else cal_html}
     """
-    return page("Dashboard", body, user, show_fab=True)
+    return page("Reminders", body, user, show_fab=True)
 
 
 @app.get("/groups", response_class=HTMLResponse)
