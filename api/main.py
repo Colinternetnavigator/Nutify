@@ -1566,7 +1566,7 @@ def reminders(request: Request, db: Session = Depends(get_db), view: str = "list
                 for d in sorted(items_direct, key=lambda x: x.expiry_date)
             )
             if direct_rows:
-                body_parts.day append(direct_rows)
+                body_parts.append(direct_rows)
 
             list_html += f"""
             <div class="group-block">
