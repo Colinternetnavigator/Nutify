@@ -352,9 +352,9 @@ def verify_password(plain: str, hashed: str) -> bool:
     return hash_password(plain) == hashed
 
 
-def create_session(db: Session, user_id: str) -> str:
+def create_session(db: Session, user_id: str, days: int = 30) -> str:
     token = secrets.token_urlsafe(32)
-    expires = datetime.utcnow() + timedelta(days=30)
+    expires = datetime.utcnow() + timedelta(days=days)
     db.add(SessionToken(user_id=user_id, token=token, expires_at=expires))
     db.commit()
     return token
@@ -1008,20 +1008,27 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request, db: Session = Depends(get_db)):
+def login_page(request: Request, db: Session = Depends(get_db), email: str = "", error: str = ""):
     if get_current_user(request, db):
         return RedirectResponse("/dashboard")
 
-    body = """
+    error_html = f'<p class="hint" style="color:var(--danger);">{html.escape(error)}</p>' if error else ""
+    body = f"""
     <div class="card" style="max-width:420px;margin:20px auto;">
       <h2>Login</h2>
+      {error_html}
       <form method="post" action="/login">
         <label>Email</label>
-        <input name="email" type="email" required>
+        <input name="email" type="email" value="{html.escape(email)}" required>
         <label>Password</label>
         <input name="password" type="password" required>
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;margin:8px 0;">
+          <input type="checkbox" name="remember" value="true" style="width:auto;margin:0;" checked>
+          Keep me logged in
+        </label>
         <button type="submit">Login</button>
       </form>
+      <p style="text-align:center;margin-top:12px;"><a href="/forgot-password">Forgot password?</a></p>
       <p style="text-align:center;"><a href="/register">Need an account?</a></p>
     </div>
     """
@@ -1029,18 +1036,98 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/login")
-def login(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email.strip().lower()).first()
-    if not user or not verify_password(password, user.password_hash):
-        return RedirectResponse("/login", status_code=302)
+def login(email: str = Form(...), password: str = Form(...), remember: str = Form(None), db: Session = Depends(get_db)):
+    email_clean = email.strip().lower()
+    user = db.query(User).filter(User.email == email_clean).first()
+    if not user:
+        return RedirectResponse(f"/login?error=No+account+found+with+that+email&email={email_clean}", status_code=302)
+    if not verify_password(password, user.password_hash):
+        return RedirectResponse(f"/login?error=Incorrect+password&email={email_clean}", status_code=302)
 
-    token = create_session(db, user.id)
+    days = 90 if remember else 7
+    token = create_session(db, user.id, days=days)
     resp = RedirectResponse("/dashboard", status_code=302)
     resp.set_cookie(
         "session_token", token, httponly=True,
-        max_age=30 * 24 * 3600, samesite="lax"
+        max_age=days * 24 * 3600, samesite="lax",
+        secure=True
     )
     return resp
+
+
+@app.get("/forgot-password", response_class=HTMLResponse)
+def forgot_password_page(request: Request):
+    body = """
+    <div class="card" style="max-width:420px;margin:20px auto;">
+      <h2>Forgot password</h2>
+      <p class="hint">Enter your email and we'll send a reset link.</p>
+      <form method="post" action="/forgot-password">
+        <label>Email</label>
+        <input name="email" type="email" required>
+        <button type="submit">Send reset link</button>
+      </form>
+    </div>
+    """
+    return page("Forgot password", body)
+
+
+@app.post("/forgot-password")
+def forgot_password(email: str = Form(...), db: Session = Depends(get_db)):
+    email_clean = email.strip().lower()
+    user = db.query(User).filter(User.email == email_clean).first()
+    if user:
+        token = secrets.token_urlsafe(32)
+        user.verification_token = token  # reuse field for reset
+        user.verification_expires = datetime.utcnow() + timedelta(hours=1)
+        db.commit()
+        api_key = os.getenv("RESEND_API_KEY")
+        from_email = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
+        base = os.getenv("BASE_URL", "https://nutify.co.uk")
+        if api_key:
+            try:
+                import requests
+                requests.post(
+                    "https://api.resend.com/emails",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={
+                        "from": from_email,
+                        "to": [email_clean],
+                        "subject": "Reset your Nutify password",
+                        "html": f'<p>Click to reset your password: <a href="{base}/reset-password?token={token}">Reset password</a></p><p>This link expires in 1 hour.</p>',
+                    },
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"Reset email failed: {e}")
+    return RedirectResponse("/login?error=If+an+account+exists,+a+reset+link+has+been+sent", status_code=302)
+
+
+@app.get("/reset-password", response_class=HTMLResponse)
+def reset_password_page(token: str = "", request: Request = None, db: Session = Depends(get_db)):
+    body = f"""
+    <div class="card" style="max-width:420px;margin:20px auto;">
+      <h2>Reset password</h2>
+      <form method="post" action="/reset-password">
+        <input type="hidden" name="token" value="{html.escape(token)}">
+        <label>New password</label>
+        <input name="password" type="password" required minlength="6">
+        <button type="submit">Update password</button>
+      </form>
+    </div>
+    """
+    return page("Reset password", body)
+
+
+@app.post("/reset-password")
+def reset_password(token: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.verification_token == token).first()
+    if not user or not user.verification_expires or user.verification_expires < datetime.utcnow():
+        return RedirectResponse("/login?error=Invalid+or+expired+reset+link", status_code=302)
+    user.password_hash = hash_password(password)
+    user.verification_token = None
+    user.verification_expires = None
+    db.commit()
+    return RedirectResponse("/login?error=Password+updated.+Please+log+in", status_code=302)
 
 
 @app.get("/logout")
@@ -1343,7 +1430,7 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
     if not user:
         return RedirectResponse("/login")
     today = date.today()
-    docs = get_accessible_documents(user, db)
+    docs = get_user_documents(user, db)
     total = len(docs)
     expired = [d for d in docs if d.expiry_date.date() < today]
     upcoming = sorted([d for d in docs if d.expiry_date.date() >= today], key=lambda d: d.expiry_date)[:5]
