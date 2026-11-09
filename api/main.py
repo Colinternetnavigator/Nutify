@@ -821,6 +821,7 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
           <a href="/documents">📄 My documents</a>
           <a href="/upgrade">⭐ Upgrade</a>
           <a href="/account">👤 My account</a>
+          <a href="/about">ℹ️ About</a>
           <a href="/logout">🚪 Logout</a>
         </div>
         '''
@@ -905,6 +906,7 @@ def home(request: Request, db: Session = Depends(get_db)):
       <h1>Make renewals less of a worry.</h1>
       <p class="hint">Keep track of passports, insurance, MOTs, subscriptions and more. Organise everything, share with family, and get reminders before things expire.</p>
       <a href="/register" class="btn btn-primary" style="width:auto;padding:14px 28px;">Get started free</a>
+      <p style="margin-top:16px;"><a href="/about">About Nutify</a></p>
     </div>
     """
     return page("Home", body, user)
@@ -1382,6 +1384,22 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
 
     return RedirectResponse(f"/add?prefill_from={file_id}", status_code=302)
 
+
+@app.get("/about", response_class=HTMLResponse)
+def about_page(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    body = """
+    <div class="card" style="text-align:center;">
+      <img src="/static/ScoutRunning.png" alt="Nutify scout" style="max-width:200px;margin-bottom:16px;" onerror="this.style.display='none'">
+      <h2>About Nutify</h2>
+      <p>At Nutify we aim to be your secure one-stop shop for important documents and renewal dates.</p>
+      <p>Passports, insurance, MOTs, subscriptions — keep everything organised in one calm place and get friendly reminders before things expire.</p>
+      <p>In the future we plan to help even more: assisting with renewals and finding you better deals when the time comes, so you can spend less time chasing paperwork and more time on the things that matter.</p>
+      <p class="hint">Secure, simple, and built for real life.</p>
+    </div>
+    """
+    return page("About", body, user)
+
 @app.get("/upgrade", response_class=HTMLResponse)
 def upgrade_page(request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
@@ -1396,7 +1414,6 @@ def upgrade_page(request: Request, db: Session = Depends(get_db)):
         <li>Unlimited push + email reminders</li>
         <li>Unlimited groups</li>
         <li>Custom calendar icons</li>
-        <li>Google Calendar sync</li>
       </ul>
       <p><strong>Monthly</strong> £0.89 / month</p>
       <button onclick="alert('Google Play billing ready — connect later')">Subscribe monthly</button>
@@ -1433,31 +1450,41 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
     docs = get_user_documents(user, db)
     total = len(docs)
     expired = [d for d in docs if d.expiry_date.date() < today]
-    upcoming = sorted([d for d in docs if d.expiry_date.date() >= today], key=lambda d: d.expiry_date)[:5]
-    recent_expired = sorted(expired, key=lambda d: d.expiry_date, reverse=True)[:5]
-
-    def row(d):
-        days = (d.expiry_date.date() - today).days
-        status = f"Expired {abs(days)}d ago" if days < 0 else f"Due in {days}d"
-        return f'<div class="doc-row"><div><strong>{html.escape(d.name)}</strong><div class="meta">{html.escape(d.doc_type)}</div></div><span class="{"expiry-soon" if days < 7 else "expiry-ok"}">{status}</span></div>'
+    due_soon = [d for d in docs if 0 <= (d.expiry_date.date() - today).days <= 28]
+    valid = [d for d in docs if (d.expiry_date.date() - today).days > 28]
+    upcoming = sorted([d for d in docs if d.expiry_date.date() >= today], key=lambda d: d.expiry_date)[:4]
 
     body = f"""
     <h2>Dashboard</h2>
-    <div class="card">
-      <p><strong>Total reminders:</strong> {total}</p>
-      <p><strong>Expired:</strong> {len(expired)}</p>
-      <p><strong>Upcoming:</strong> {total - len(expired)}</p>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;">
+      <div class="card" style="text-align:center;background:#fee2e2;padding:16px 8px;">
+        <div style="font-size:1.8rem;font-weight:800;color:#dc2626;">{len(expired)}</div>
+        <div class="meta">Expired</div>
+      </div>
+      <div class="card" style="text-align:center;background:#fef3c7;padding:16px 8px;">
+        <div style="font-size:1.8rem;font-weight:800;color:#d97706;">{len(due_soon)}</div>
+        <div class="meta">Due soon</div>
+      </div>
+      <div class="card" style="text-align:center;background:#d1fae5;padding:16px 8px;">
+        <div style="font-size:1.8rem;font-weight:800;color:#059669;">{len(valid)}</div>
+        <div class="meta">Valid</div>
+      </div>
+      <div class="card" style="text-align:center;background:#f1f5f9;padding:16px 8px;">
+        <div style="font-size:1.8rem;font-weight:800;">{total}</div>
+        <div class="meta">Total</div>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <h3 style="margin:0;font-size:0.85rem;letter-spacing:0.05em;color:var(--muted);">UPCOMING RENEWALS</h3>
+      <a href="/reminders" style="color:var(--accent-dark);font-weight:600;text-decoration:none;">See all</a>
     </div>
     <div class="card">
-      <h3>Next due</h3>
-      {''.join(row(d) for d in upcoming) or '<p class="hint">Nothing upcoming.</p>'}
-    </div>
-    <div class="card">
-      <h3>Recently expired</h3>
-      {''.join(row(d) for d in recent_expired) or '<p class="hint">No expired items.</p>'}
+      {''.join(f'<div class="doc-row"><div><strong>{html.escape(d.name)}</strong><div class="meta">{html.escape(d.doc_type)}</div></div><span class="expiry-ok">Due in {(d.expiry_date.date()-today).days}d</span></div>' for d in upcoming) or '<p class="hint">Nothing upcoming.</p>'}
     </div>
     """
     return page("Dashboard", body, user, show_fab=True)
+
+@app.get("/reminders", response_class=HTMLResponse)
 
 @app.get("/reminders", response_class=HTMLResponse)
 def reminders(request: Request, db: Session = Depends(get_db), view: str = "list", month: str = None):
@@ -1505,7 +1532,7 @@ def reminders(request: Request, db: Session = Depends(get_db), view: str = "list
                 body_parts.append(f"""
                 <div class="subgroup">
                   <div class="subgroup-header" onclick="this.nextElementSibling.classList.toggle('open')">
-                    ▸ {html.escape(s.name)} ({len(s_docs)})
+                    > {html.escape(s.name)} ({len(s_docs)})
                   </div>
                   <div class="group-body">{s_rows or '<div class="meta">No items</div>'}</div>
                 </div>
@@ -1814,9 +1841,6 @@ def groups_page(request: Request, db: Session = Depends(get_db)):
               <input name="name" value="{html.escape(g.name, quote=True)}" required>
               <select name="color" aria-label="Group colour">{color_opts}</select>
               <button type="submit" class="btn-sm" style="width:auto;">Save</button>
-            </form>
-
-              <button type="submit" class="btn-sm" style="width:auto;">Add subgroup</button>
             </form>
             <form method="post" action="/groups/{g.id}/share" style="margin-top:8px;" class="form-row">
               <input name="email" type="email" placeholder="Share with email" required>
