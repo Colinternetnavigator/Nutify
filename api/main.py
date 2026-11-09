@@ -807,7 +807,7 @@ label {
 """
 
 
-def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = False) -> str:
+def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = False, fab_mode: str = "reminder") -> str:
     if user:
         menu = f'''
         <div class="header-right">
@@ -818,20 +818,25 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
           <a href="/dashboard">🏠 Dashboard</a>
           <a href="/reminders">📋 Reminders</a>
           <a href="/groups">📁 Groups</a>
-          <a href="/documents">📄 My documents</a>
+          <a href="/documents">📄 My Documents</a>
           <a href="/upgrade">⭐ Upgrade</a>
-          <a href="/account">👤 My account</a>
+          <a href="/account">👤 My Account</a>
           <a href="/about">ℹ️ About</a>
           <a href="/logout">🚪 Logout</a>
         </div>
         '''
-        fab = '''
-        <button class="fab" onclick="document.getElementById('addChoice').classList.toggle('open')">+</button>
-        <div class="add-choice" id="addChoice">
-          <a href="/add">Add manually</a>
-          <a href="/add-from-document">Add from document</a>
-        </div>
-        ''' if show_fab else ''
+        if fab_mode == "document":
+            fab = '<a href="/add-from-document" class="fab" title="Upload document">+</a>'
+        elif fab_mode == "group":
+            fab = '<a href="/groups/new" class="fab" title="Add group">+</a>'
+        else:
+            fab = '''
+            <button class="fab" onclick="document.getElementById('addChoice').classList.toggle('open')">+</button>
+            <div class="add-choice" id="addChoice">
+              <a href="/add">Add reminder</a>
+              <a href="/add-from-document">Add from document</a>
+            </div>
+            '''
     else:
         menu = '''
         <div class="nav">
@@ -1217,11 +1222,11 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
         </div>'''
     body = f"""
     <div class="card">
-      <h2>My documents</h2>
+      <h2>My Documents</h2>
       {rows or '<p class="hint">No documents uploaded yet.</p>'}
     </div>
     """
-    return page("My documents", body, user, show_fab=True)
+    return page("My Documents", body, user, show_fab=True, fab_mode="document")
 
 @app.get("/documents/{file_id}/view")
 def view_document(file_id: str, request: Request, db: Session = Depends(get_db)):
@@ -1432,14 +1437,32 @@ def account_page(request: Request, db: Session = Depends(get_db)):
     verified = "Yes" if user.email_verified else "No"
     body = f"""
     <div class="card">
-      <h2>My account</h2>
+      <h2>My Account</h2>
       <p><strong>Email:</strong> {html.escape(user.email)}</p>
       <p><strong>Plan:</strong> {user.plan.title()}</p>
       <p><strong>Email verified:</strong> {verified}</p>
-      <p class="hint">To send verification emails you need an email provider (Resend, SendGrid, etc.). Set SMTP or API keys as environment variables and call it from the register endpoint.</p>
+    </div>
+    <div class="card">
+      <h3>Change password</h3>
+      <form method="post" action="/account/password">
+        <label>Current password</label>
+        <input name="current" type="password" required>
+        <label>New password</label>
+        <input name="new_password" type="password" required minlength="6">
+        <button type="submit">Update password</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Delete account</h3>
+      <p class="hint">This permanently removes your account and all data.</p>
+      <form method="post" action="/account/delete" onsubmit="return confirm('Delete your account forever?')">
+        <label>Type DELETE to confirm</label>
+        <input name="confirm" required>
+        <button type="submit" class="btn btn-danger">Delete account</button>
+      </form>
     </div>
     """
-    return page("Account", body, user)
+    return page("My Account", body, user)
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard_overview(request: Request, db: Session = Depends(get_db)):
@@ -1457,10 +1480,10 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
     body = f"""
     <h2>Dashboard</h2>
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px;">
-      <div class="card" style="text-align:center;background:#fee2e2;padding:16px 8px;">
+      <a href="/reminders?filter=expired" class="card" style="text-align:center;background:#fee2e2;padding:16px 8px;text-decoration:none;color:inherit;">
         <div style="font-size:1.8rem;font-weight:800;color:#dc2626;">{len(expired)}</div>
         <div class="meta">Expired</div>
-      </div>
+      </a>
       <div class="card" style="text-align:center;background:#fef3c7;padding:16px 8px;">
         <div style="font-size:1.8rem;font-weight:800;color:#d97706;">{len(due_soon)}</div>
         <div class="meta">Due soon</div>
@@ -1543,7 +1566,7 @@ def reminders(request: Request, db: Session = Depends(get_db), view: str = "list
                 for d in sorted(items_direct, key=lambda x: x.expiry_date)
             )
             if direct_rows:
-                body_parts.append(direct_rows)
+                body_parts.day append(direct_rows)
 
             list_html += f"""
             <div class="group-block">
@@ -1883,7 +1906,7 @@ def groups_page(request: Request, db: Session = Depends(get_db)):
     {owned_html}
     {"<h3>Shared with you</h3>" + shared_html if shared_html else ""}
     """
-    return page("Groups", body, user, show_fab=True)
+    return page("Groups", body, user, show_fab=True, fab_mode="group")
 
 
 @app.post("/groups")
@@ -2248,7 +2271,7 @@ async def create_document(request: Request, db: Session = Depends(get_db)):
 
     if color not in GROUP_COLORS:
         color = None
-    if icon not in ICON_MAP or not is_unlimited(user):
+    if icon not in ICON_MAP:
         icon = "dot"
 
     extra = {}
@@ -2411,7 +2434,7 @@ async def edit_document(doc_id: str, request: Request, db: Session = Depends(get
 
     if color not in GROUP_COLORS:
         color = None
-    if icon not in ICON_MAP or not is_unlimited(user):
+    if icon not in ICON_MAP:
         icon = "dot"
 
     extra = {}
