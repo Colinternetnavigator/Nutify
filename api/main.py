@@ -1481,11 +1481,12 @@ def upgrade_page(request: Request, db: Session = Depends(get_db)):
     return page("Upgrade", body, user)
 
 @app.get("/account", response_class=HTMLResponse)
-def account_page(request: Request, db: Session = Depends(get_db)):
+def account_page(request: Request, db: Session = Depends(get_db), msg: str = ""):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
     verified = "Yes" if user.email_verified else "No"
+    msg_js = f'<script>if("{html.escape(msg)}") alert("{html.escape(msg)}");</script>' if msg else ""
     cancel_section = ""
     if is_unlimited(user):
         cancel_section = '''
@@ -1510,8 +1511,11 @@ def account_page(request: Request, db: Session = Depends(get_db)):
         <input name="current" type="password" required>
         <label>New password</label>
         <input name="new_password" type="password" required minlength="6">
+        <label>Confirm new password</label>
+        <input name="confirm_password" type="password" required minlength="6">
         <button type="submit">Update password</button>
       </form>
+      <p style="margin-top:12px;"><a href="/forgot-password">Forgot password?</a></p>
     </div>
     <div class="card">
       <h3>Delete account</h3>
@@ -1521,17 +1525,19 @@ def account_page(request: Request, db: Session = Depends(get_db)):
       </form>
     </div>
     """
-    return page("My Account", body, user)
+    return page("My Account", body + msg_js, user)
 
 
 @app.post("/account/password")
-def change_password(current: str = Form(...), new_password: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
+def change_password(current: str = Form(...), new_password: str = Form(...), confirm_password: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
     user = require_user(request, db)
     if not verify_password(current, user.password_hash):
-        return RedirectResponse("/account?msg=Current+password+incorrect", status_code=302)
+        return RedirectResponse("/account?msg=Current+password+is+incorrect", status_code=302)
+    if new_password != confirm_password:
+        return RedirectResponse("/account?msg=New+passwords+do+not+match", status_code=302)
     user.password_hash = hash_password(new_password)
     db.commit()
-    return RedirectResponse("/account?msg=Password+updated", status_code=302)
+    return RedirectResponse("/account?msg=Password+changed+successfully", status_code=302)
 
 @app.post("/account/delete")
 def delete_account(request: Request = None, db: Session = Depends(get_db)):
@@ -2360,6 +2366,10 @@ async def create_document(request: Request, db: Session = Depends(get_db)):
     user = require_user(request, db)
     if not user.email_verified:
         return RedirectResponse("/account?msg=Please+verify+your+email+before+adding+reminders", status_code=302)
+    if not is_unlimited(user):
+        count = db.query(Document).filter(Document.user_id == user.id).count()
+        if count >= 3:
+            return RedirectResponse("/add?limit=1", status_code=302)
     form = await request.form()
 
     name = (form.get("name") or "").strip()
