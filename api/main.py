@@ -337,7 +337,7 @@ ensure_schema()
 
 try:
     _db = SessionLocal()
-    _test = _db.query(User).filter(User.email == "test@email.com").first()
+    _test = _db.query(User).filter(User.email.in_(["test@email.com", "test@mail.com"])).first()
     if _test and _test.plan != "unlimited":
         _test.plan = "unlimited"
         _db.commit()
@@ -1490,14 +1490,31 @@ def account_page(request: Request, db: Session = Depends(get_db)):
     <div class="card">
       <h3>Delete account</h3>
       <p class="hint">This permanently removes your account and all data.</p>
-      <form method="post" action="/account/delete" onsubmit="return confirm('Delete your account forever?')">
-        <label>Type DELETE to confirm</label>
-        <input name="confirm" required>
+      <form method="post" action="/account/delete" onsubmit="return confirm('Are you sure you want to delete your account? This cannot be undone.')">
         <button type="submit" class="btn btn-danger">Delete account</button>
       </form>
     </div>
     """
-    return page("My Account", body, user)
+    return page("My Account", body, user, show_fab=True)
+
+
+@app.post("/account/password")
+def change_password(current: str = Form(...), new_password: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    if not verify_password(current, user.password_hash):
+        return RedirectResponse("/account?msg=Current+password+incorrect", status_code=302)
+    user.password_hash = hash_password(new_password)
+    db.commit()
+    return RedirectResponse("/account?msg=Password+updated", status_code=302)
+
+@app.post("/account/delete")
+def delete_account(request: Request = None, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    db.delete(user)
+    db.commit()
+    resp = RedirectResponse("/", status_code=302)
+    resp.delete_cookie("session_token")
+    return resp
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard_overview(request: Request, db: Session = Depends(get_db)):
@@ -2171,6 +2188,7 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     doc_type = "insurance"
     notes = ""
     expiry = ""
+    prefill_note = ""
     if prefill_from:
         df = db.query(DocumentFile).filter(DocumentFile.id == prefill_from, DocumentFile.user_id == user.id).first()
         if df:
