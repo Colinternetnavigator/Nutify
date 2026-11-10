@@ -369,11 +369,16 @@ ensure_schema()
 
 try:
     _db = SessionLocal()
-    for email in ["test@email.com", "test@mail.com", "test2@mail.com"]:
+    for email in ["test@email.com", "test@mail.com"]:
         _u = _db.query(User).filter(User.email == email).first()
         if _u:
             _u.plan = "unlimited"
             _u.email_verified = True
+    # test2 stays basic but verified
+    _t2 = _db.query(User).filter(User.email == "test2@mail.com").first()
+    if _t2:
+        _t2.plan = "free"
+        _t2.email_verified = True
     _db.commit()
     _db.close()
 except Exception:
@@ -1212,17 +1217,17 @@ def _doc_row_html(d: Document, today: date, current_user_id: str) -> str:
 
     return f"""
     <div class="doc-row">
-      <div>
-        <span class="{icon_class}" style="color:{color};background:{color};display:inline-flex;vertical-align:middle;margin-right:6px;{'color:white;' if icon_class == 'cal-dot' else ''}">{html.escape(symbol)}</span>
-        <strong>{html.escape(d.name)}</strong> {shared}
-        <div class="meta">{html.escape(d.doc_type)}</div>
-        <span class="{cls}">{expiry_text}</span>
+      <div style="display:flex;align-items:flex-start;gap:8px;">
+        <input type="checkbox" name="ids" value="{d.id}" style="width:auto;margin-top:4px;">
+        <div>
+          <span class="{icon_class}" style="color:{color};background:{color};display:inline-flex;vertical-align:middle;margin-right:6px;{'color:white;' if icon_class == 'cal-dot' else ''}">{html.escape(symbol)}</span>
+          <strong>{html.escape(d.name)}</strong> {shared}
+          <div class="meta">{html.escape(d.doc_type)}</div>
+          <span class="{cls}">{expiry_text}</span>
+        </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
         <a href="/documents/{d.id}/edit" class="btn btn-outline btn-sm">Edit</a>
-        <form method="post" action="/documents/{d.id}/delete" style="margin:0;width:auto;" onsubmit="return confirm('Delete?')">
-          <button type="submit" class="btn btn-danger btn-sm" style="width:auto;">Delete</button>
-        </form>
       </div>
     </div>
     """
@@ -1257,7 +1262,7 @@ def my_documents(request: Request, db: Session = Depends(get_db)):
             {inner or '<p class="hint">No files yet</p>'}
             <form method="post" action="/cabinets/{cab.id}/file" style="margin-top:8px;" class="form-row">
               <input name="name" placeholder="New file name" required>
-              <button type="submit" class="btn-sm" style="width:auto;">Add file</button>
+              <button type="submit" class="btn-sm" style="width:auto;">Add folder</button>
             </form>
           </div>
         </div>
@@ -1889,7 +1894,10 @@ def reminders(request: Request, db: Session = Depends(get_db), view: str = "list
       <a href="/reminders?view=list" class="{list_active}">List</a>
       <a href="/reminders?view=calendar" class="{cal_active}">Calendar</a>
     </div>
-    {list_html if view == "list" else cal_html}
+    <form method="post" action="/reminders/delete" onsubmit="return confirm('Delete selected reminders?')">
+      {list_html if view == "list" else cal_html}
+      <button type="submit" class="btn btn-danger" style="margin-top:12px;">🗑 Delete selected</button>
+    </form>
     """
     return page("Reminders", body, user, show_fab=True)
 
@@ -2573,7 +2581,7 @@ def delete_document(doc_id: str, request: Request, db: Session = Depends(get_db)
 
     db.delete(doc)
     db.commit()
-    return RedirectResponse("/dashboard", status_code=302)
+    return RedirectResponse("/reminders", status_code=302)
 
 
 @app.post("/push/subscribe")
