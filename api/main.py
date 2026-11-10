@@ -253,6 +253,7 @@ class DocumentFile(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     document_id = Column(String, ForeignKey("documents.id"), nullable=True)
+    cabinet_file_id = Column(String, ForeignKey("cabinet_files.id"), nullable=True)
     filename = Column(String, nullable=False)
     content_type = Column(String, nullable=True)
     file_path = Column(String, nullable=False)
@@ -260,6 +261,21 @@ class DocumentFile(Base):
     created_at = Column(DateTime, default=func.now())
     user = relationship("User")
     document = relationship("Document")
+
+class Cabinet(Base):
+    __tablename__ = "cabinets"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    name = Column(String, nullable=False)
+    color = Column(String, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+class CabinetFile(Base):
+    __tablename__ = "cabinet_files"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    cabinet_id = Column(String, ForeignKey("cabinets.id"), nullable=False)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=func.now())
 
 class PushSubscription(Base):
     __tablename__ = "push_subscriptions"
@@ -279,8 +295,24 @@ def ensure_schema():
     """Safely add fields to existing SQLite/Postgres databases."""
     inspector = inspect(engine)
 
+    if not inspector.has_table("cabinets"):
+        try:
+            Cabinet.__table__.create(bind=engine)
+        except Exception:
+            pass
+    if not inspector.has_table("cabinet_files"):
+        try:
+            CabinetFile.__table__.create(bind=engine)
+        except Exception:
+            pass
     if inspector.has_table("document_files"):
         cols = [c["name"] for c in inspector.get_columns("document_files")]
+        if "cabinet_file_id" not in cols:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE document_files ADD COLUMN cabinet_file_id VARCHAR"))
+            except Exception:
+                pass
         if "extracted_data" not in cols:
             try:
                 with engine.begin() as conn:
@@ -337,10 +369,12 @@ ensure_schema()
 
 try:
     _db = SessionLocal()
-    _test = _db.query(User).filter(User.email.in_(["test@email.com", "test@mail.com"])).first()
-    if _test and _test.plan != "unlimited":
-        _test.plan = "unlimited"
-        _db.commit()
+    for email in ["test@email.com", "test@mail.com", "test2@mail.com"]:
+        _u = _db.query(User).filter(User.email == email).first()
+        if _u:
+            _u.plan = "unlimited"
+            _u.email_verified = True
+    _db.commit()
     _db.close()
 except Exception:
     pass
@@ -1202,79 +1236,66 @@ def is_unlimited(user: User) -> bool:
 @app.get("/documents", response_class=HTMLResponse)
 def my_documents(request: Request, db: Session = Depends(get_db)):
     user = require_user(request, db)
-    files = db.query(DocumentFile).filter(DocumentFile.user_id == user.id).order_by(DocumentFile.created_at.desc()).all()
-    rows = ""
-    for f in files:
-        item_name = ""
-        if f.document_id:
-            doc = db.query(Document).filter(Document.id == f.document_id).first()
-            if doc:
-                item_name = html.escape(doc.name)
-        if not item_name and f.extracted_data:
-            try:
-                data = json.loads(f.extracted_data)
-                item_name = html.escape(data.get("name") or "")
-            except Exception:
-                pass
-        short_name = html.escape(f.filename[:28] + "…" if len(f.filename) > 28 else f.filename)
-        rows += f'''
-        <div class="doc-row">
-          <div style="min-width:0;flex:1;">
-            <strong title="{html.escape(f.filename)}">{short_name}</strong>
-            <div class="meta">{f.created_at.strftime("%d %b %Y")}</div>
-            {f'<div class="meta">Item: {item_name}</div>' if item_name else ''}
+    cabinets = db.query(Cabinet).filter(Cabinet.user_id == user.id).order_by(Cabinet.name).all()
+    loose = db.query(DocumentFile).filter(DocumentFile.user_id == user.id, DocumentFile.cabinet_file_id == None).order_by(DocumentFile.created_at.desc()).all()
+
+    cab_html = ""
+    for cab in cabinets:
+        files_in = db.query(CabinetFile).filter(CabinetFile.cabinet_id == cab.id).all()
+        inner = ""
+        for cf in files_in:
+            docs = db.query(DocumentFile).filter(DocumentFile.cabinet_file_id == cf.id).all()
+            doc_rows = "".join(f'<div class="meta" style="margin-left:16px;">{html.escape(d.filename)}</div>' for d in docs)
+            inner += f'<div style="margin:6px 0 6px 12px;"><strong>{html.escape(cf.name)}</strong> {doc_rows or "<span class=meta>empty</span>"}</div>'
+        cab_html += f"""
+        <div class="group-block">
+          <div class="group-header" onclick="this.nextElementSibling.classList.toggle('open')">
+            <span class="color-dot" style="background:{cab.color or '#f97316'}"></span>
+            <span style="flex:1;font-weight:700;">{html.escape(cab.name)}</span>
           </div>
-          <div style="display:flex;gap:6px;flex-shrink:0;">
-            <a href="/documents/{f.id}/view" class="btn btn-outline btn-sm" target="_blank">View</a>
-            <a href="/documents/{f.id}/rename" class="btn btn-outline btn-sm">Rename</a>
-            <a href="/documents/{f.id}/download" class="btn btn-outline btn-sm">Download</a>
-            <button onclick="if(confirm('Delete this document?')) location.href='/documents/{f.id}/delete'" class="btn btn-danger btn-sm">Delete</button>
+          <div class="group-body">
+            {inner or '<p class="hint">No files yet</p>'}
+            <form method="post" action="/cabinets/{cab.id}/file" style="margin-top:8px;" class="form-row">
+              <input name="name" placeholder="New file name" required>
+              <button type="submit" class="btn-sm" style="width:auto;">Add file</button>
+            </form>
           </div>
-        </div>'''
+        </div>
+        """
+
+    loose_html = "".join(f'<div class="doc-row"><strong>{html.escape(f.filename)}</strong></div>' for f in loose) or '<p class="hint">No loose documents</p>'
+
     body = f"""
     <div class="card">
       <h2>My Documents</h2>
-      {rows or '<p class="hint">No documents uploaded yet.</p>'}
+      <form method="post" action="/cabinets" class="form-row" style="margin-bottom:16px;">
+        <input name="name" placeholder="New cabinet name" required>
+        <button type="submit" class="btn-sm" style="width:auto;">Add cabinet</button>
+      </form>
+      <h3>Cabinets</h3>
+      {cab_html or '<p class="hint">No cabinets yet. Create one to organise documents.</p>'}
+      <h3 style="margin-top:20px;">Loose documents</h3>
+      {loose_html}
     </div>
     """
     return page("My Documents", body, user, show_fab=True, fab_mode="document")
 
-@app.get("/documents/{file_id}/view")
-def view_document(file_id: str, request: Request, db: Session = Depends(get_db)):
+@app.post("/cabinets")
+def create_cabinet(name: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
     user = require_user(request, db)
-    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
-    if not df or not Path(df.file_path).exists():
-        raise HTTPException(404)
-    return FileResponse(df.file_path, media_type=df.content_type or "application/octet-stream")
-
-@app.get("/documents/{file_id}/rename", response_class=HTMLResponse)
-def rename_document_page(file_id: str, request: Request, db: Session = Depends(get_db)):
-    user = require_user(request, db)
-    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
-    if not df:
-        raise HTTPException(404)
-    body = f"""
-    <div class="card" style="max-width:420px;margin:20px auto;">
-      <h2>Rename document</h2>
-      <form method="post" action="/documents/{file_id}/rename">
-        <label>New name</label>
-        <input name="filename" value="{html.escape(df.filename)}" required>
-        <button type="submit">Save</button>
-      </form>
-    </div>
-    """
-    return page("Rename document", body, user)
-
-@app.post("/documents/{file_id}/rename")
-def rename_document(file_id: str, filename: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
-    user = require_user(request, db)
-    df = db.query(DocumentFile).filter(DocumentFile.id == file_id, DocumentFile.user_id == user.id).first()
-    if not df:
-        raise HTTPException(404)
-    df.filename = filename.strip() or df.filename
+    db.add(Cabinet(user_id=user.id, name=name.strip(), color="#f97316"))
     db.commit()
     return RedirectResponse("/documents", status_code=302)
 
+@app.post("/cabinets/{cab_id}/file")
+def create_cabinet_file(cab_id: str, name: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    cab = db.query(Cabinet).filter(Cabinet.id == cab_id, Cabinet.user_id == user.id).first()
+    if not cab:
+        raise HTTPException(404)
+    db.add(CabinetFile(cabinet_id=cab_id, name=name.strip()))
+    db.commit()
+    return RedirectResponse("/documents", status_code=302)
 
 @app.get("/documents/{file_id}/download")
 def download_document(file_id: str, request: Request, db: Session = Depends(get_db)):
@@ -1495,7 +1516,7 @@ def account_page(request: Request, db: Session = Depends(get_db)):
       </form>
     </div>
     """
-    return page("My Account", body, user, show_fab=True)
+    return page("My Account", body, user)
 
 
 @app.post("/account/password")
@@ -1965,7 +1986,7 @@ def groups_page(request: Request, db: Session = Depends(get_db)):
     {owned_html}
     {"<h3>Shared with you</h3>" + shared_html if shared_html else ""}
     """
-    return page("Groups", body, user, show_fab=True, fab_mode="group")
+    return page("Groups", body, user)
 
 
 @app.post("/groups")
@@ -2329,6 +2350,8 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
 @app.post("/documents")
 async def create_document(request: Request, db: Session = Depends(get_db)):
     user = require_user(request, db)
+    if not user.email_verified:
+        return RedirectResponse("/account?msg=Please+verify+your+email+before+adding+reminders", status_code=302)
     form = await request.form()
 
     name = (form.get("name") or "").strip()
