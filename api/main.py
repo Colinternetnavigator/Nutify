@@ -335,6 +335,16 @@ def ensure_schema():
 
 ensure_schema()
 
+try:
+    _db = SessionLocal()
+    _test = _db.query(User).filter(User.email == "test@email.com").first()
+    if _test and _test.plan != "unlimited":
+        _test.plan = "unlimited"
+        _db.commit()
+    _db.close()
+except Exception:
+    pass
+
 
 def get_db():
     db = SessionLocal()
@@ -809,6 +819,7 @@ label {
 
 def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = False, fab_mode: str = "reminder") -> str:
     if user:
+        upgrade_link = '' if is_unlimited(user) else '<a href="/upgrade">⭐ Upgrade</a>'
         menu = f'''
         <div class="header-right">
           <button class="hamburger" onclick="document.getElementById('menuPanel').classList.toggle('open');document.getElementById('menuOverlay').classList.toggle('open')">☰</button>
@@ -819,7 +830,7 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
           <a href="/reminders">📋 Reminders</a>
           <a href="/groups">📁 Groups</a>
           <a href="/documents">📄 My Documents</a>
-          <a href="/upgrade">⭐ Upgrade</a>
+          {upgrade_link}
           <a href="/account">👤 My Account</a>
           <a href="/about">ℹ️ About</a>
           <a href="/logout">🚪 Logout</a>
@@ -1405,6 +1416,20 @@ def about_page(request: Request, db: Session = Depends(get_db)):
     """
     return page("About", body, user)
 
+
+@app.get("/upgrade/success", response_class=HTMLResponse)
+def upgrade_success(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    body = """
+    <div class="card" style="text-align:center;max-width:400px;margin:40px auto;">
+      <img src="/static/ScoutUnlimited.png" alt="" style="max-width:160px;margin-bottom:12px;" onerror="this.style.display='none'">
+      <h2>Congratulations</h2>
+      <p>Scout is ready to get to work on your reminders.</p>
+      <a href="/dashboard" class="btn btn-primary">Continue</a>
+    </div>
+    """
+    return page("Welcome", body, user)
+
 @app.get("/upgrade", response_class=HTMLResponse)
 def upgrade_page(request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
@@ -1435,6 +1460,15 @@ def account_page(request: Request, db: Session = Depends(get_db)):
     if not user:
         return RedirectResponse("/login")
     verified = "Yes" if user.email_verified else "No"
+    cancel_section = ""
+    if is_unlimited(user):
+        cancel_section = '''
+        <div class="card">
+          <h3>Cancel subscription</h3>
+          <p class="hint">Manage or cancel your Unlimited plan via Google Play.</p>
+          <button onclick="alert('Google Play cancel placeholder')">Cancel subscription</button>
+        </div>
+        '''
     body = f"""
     <div class="card">
       <h2>My Account</h2>
@@ -1442,6 +1476,7 @@ def account_page(request: Request, db: Session = Depends(get_db)):
       <p><strong>Plan:</strong> {user.plan.title()}</p>
       <p><strong>Email verified:</strong> {verified}</p>
     </div>
+    {cancel_section}
     <div class="card">
       <h3>Change password</h3>
       <form method="post" action="/account/password">
@@ -1484,18 +1519,18 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
         <div style="font-size:1.8rem;font-weight:800;color:#dc2626;">{len(expired)}</div>
         <div class="meta">Expired</div>
       </a>
-      <div class="card" style="text-align:center;background:#fef3c7;padding:16px 8px;">
+      <a href="/reminders?filter=due" class="card" style="text-align:center;background:#fef3c7;padding:16px 8px;text-decoration:none;color:inherit;">
         <div style="font-size:1.8rem;font-weight:800;color:#d97706;">{len(due_soon)}</div>
         <div class="meta">Due soon</div>
-      </div>
-      <div class="card" style="text-align:center;background:#d1fae5;padding:16px 8px;">
+      </a>
+      <a href="/reminders?filter=valid" class="card" style="text-align:center;background:#d1fae5;padding:16px 8px;text-decoration:none;color:inherit;">
         <div style="font-size:1.8rem;font-weight:800;color:#059669;">{len(valid)}</div>
         <div class="meta">Valid</div>
-      </div>
-      <div class="card" style="text-align:center;background:#f1f5f9;padding:16px 8px;">
+      </a>
+      <a href="/reminders" class="card" style="text-align:center;background:#f1f5f9;padding:16px 8px;text-decoration:none;color:inherit;">
         <div style="font-size:1.8rem;font-weight:800;">{total}</div>
         <div class="meta">Total</div>
-      </div>
+      </a>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
       <h3 style="margin:0;font-size:0.85rem;letter-spacing:0.05em;color:var(--muted);">UPCOMING RENEWALS</h3>
@@ -1510,12 +1545,19 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
 @app.get("/reminders", response_class=HTMLResponse)
 
 @app.get("/reminders", response_class=HTMLResponse)
-def reminders(request: Request, db: Session = Depends(get_db), view: str = "list", month: str = None):
+def reminders(request: Request, db: Session = Depends(get_db), view: str = "list", month: str = None, filter: str = None):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
 
     docs = get_user_documents(user, db)
+    today = date.today()
+    if filter == "expired":
+        docs = [d for d in docs if d.expiry_date.date() < today]
+    elif filter == "due":
+        docs = [d for d in docs if 0 <= (d.expiry_date.date() - today).days <= 28]
+    elif filter == "valid":
+        docs = [d for d in docs if (d.expiry_date.date() - today).days > 28]
     groups = get_accessible_groups(user, db)
     top_groups = [g for g in groups if g.parent_id is None]
     subgroups_by_parent = defaultdict(list)
@@ -2106,7 +2148,25 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     if not user:
         return RedirectResponse("/login")
 
-    prefill_note = ""
+    limit_popup = ""
+    if request.query_params.get("limit") == "1":
+        limit_popup = '''
+        <div id="limitModal" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:50;display:flex;align-items:center;justify-content:center;">
+          <div class="card" style="max-width:360px;text-align:center;position:relative;">
+            <button onclick="document.getElementById('limitModal').remove()" style="position:absolute;top:8px;right:8px;background:none;border:none;font-size:1.4rem;cursor:pointer;">×</button>
+            <img src="/static/ScoutBasic.png" alt="" style="max-width:140px;margin-bottom:12px;" onerror="this.style.display='none'">
+            <h3>You've used all your free reminders</h3>
+            <p>Upgrade to Unlimited and receive:</p>
+            <ul style="text-align:left;">
+              <li>Unlimited reminders</li>
+              <li>Email + push notifications</li>
+              <li>Custom calendar icons</li>
+              <li>Unlimited groups</li>
+            </ul>
+            <button onclick="alert('Google Play billing placeholder')">Upgrade now</button>
+          </div>
+        </div>
+        '''
     name = ""
     doc_type = "insurance"
     notes = ""
@@ -2158,6 +2218,7 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
     body = f"""
     <div class="card">
       <h2>Add item</h2>
+      {limit_popup}
       {prefill_note}
       <p class="hint"><span class="req">*</span> = mandatory. Everything else is optional.</p>
       <form method="post" action="/documents" id="docForm">
@@ -2604,7 +2665,7 @@ self.addEventListener('push', event => {
     actions: [
       { action: 'snooze1', title: 'Snooze 1h' },
       { action: 'snooze4', title: 'Snooze 4h' },
-      { action: 'snooze24', title: 'Snooze 24h' }
+      { action: 'cancel', title: 'Cancel' }
     ]
   };
 
