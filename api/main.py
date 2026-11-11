@@ -2650,6 +2650,9 @@ def check_reminders(db: Session = Depends(get_db)):
             continue
 
         days_left = (doc.expiry_date.date() - today).days
+        # Skip if more than 3 days past expiry
+        if days_left < -3:
+            continue
         if days_left > (doc.reminder_days or 30):
             continue
 
