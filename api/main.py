@@ -1907,6 +1907,17 @@ def reminders(request: Request, db: Session = Depends(get_db), view: str = "list
     """
     return page("Reminders", body, user, show_fab=True)
 
+@app.post("/reminders/delete")
+async def delete_selected_reminders(request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    form = await request.form()
+    ids = form.getlist("ids")
+    for did in ids:
+        doc = db.query(Document).filter(Document.id == did, Document.user_id == user.id).first()
+        if doc:
+            db.delete(doc)
+    db.commit()
+    return RedirectResponse("/reminders", status_code=302)
 
 @app.get("/groups", response_class=HTMLResponse)
 def groups_page(request: Request, db: Session = Depends(get_db)):
