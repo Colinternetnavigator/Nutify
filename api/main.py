@@ -1227,6 +1227,7 @@ def _doc_row_html(d: Document, today: date, current_user_id: str) -> str:
         </div>
       </div>
       <div style="display:flex;gap:6px;flex-shrink:0;">
+        <a href="/documents/{d.id}/renew" class="btn btn-outline btn-sm">Done / Renew</a>
         <a href="/documents/{d.id}/edit" class="btn btn-outline btn-sm">Edit</a>
       </div>
     </div>
@@ -2206,7 +2207,7 @@ def _group_options(user: User, db: Session, selected: Optional[str] = None) -> s
 
 
 @app.get("/add", response_class=HTMLResponse)
-def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None):
+def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str = None, renew_from: str = None, name: str = "", doc_type: str = "", notes: str = ""):
     user = get_current_user(request, db)
     if not user:
         return RedirectResponse("/login")
@@ -2230,11 +2231,13 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
           </div>
         </div>
         '''
-    name = ""
-    doc_type = "insurance"
-    notes = ""
+    name = name or ""
+    doc_type = doc_type or "insurance"
+    notes = notes or ""
     expiry = ""
     prefill_note = ""
+    if renew_from:
+        prefill_note = '<p class="hint" style="background:#ecfdf5;padding:10px;border-radius:8px;">Renewing — set the new expiry date below.</p>'
     if prefill_from:
         df = db.query(DocumentFile).filter(DocumentFile.id == prefill_from, DocumentFile.user_id == user.id).first()
         if df:
