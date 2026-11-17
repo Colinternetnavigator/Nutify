@@ -968,16 +968,23 @@ def home(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/register", response_class=HTMLResponse)
-def register_page(request: Request, db: Session = Depends(get_db)):
+def register_page(request: Request, db: Session = Depends(get_db), error: str = "", email: str = ""):
     if get_current_user(request, db):
         return RedirectResponse("/dashboard")
 
-    body = """
+    msg = ""
+    if error == "exists":
+        msg = '<p class="hint" style="color:var(--danger);">An account with that email already exists. <a href="/login">Log in</a></p>'
+    elif error == "unverified":
+        msg = f'<p class="hint">This email is waiting for verification. <a href="/resend-verification?email={html.escape(email)}">Resend verification email</a></p>'
+
+    body = f"""
     <div class="card" style="max-width:420px;margin:20px auto;">
       <h2>Create account</h2>
+      {msg}
       <form method="post" action="/register">
         <label>Email <span class="req">*</span></label>
-        <input name="email" type="email" required>
+        <input name="email" type="email" value="{html.escape(email)}" required>
         <label>Password <span class="req">*</span></label>
         <input name="password" type="password" required minlength="6">
         <button type="submit">Register</button>
@@ -991,8 +998,18 @@ def register_page(request: Request, db: Session = Depends(get_db)):
 @app.post("/register")
 def register(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     email = email.strip().lower()
-    if db.query(User).filter(User.email == email).first():
-        return RedirectResponse("/register?error=exists", status_code=302)
+    existing = db.query(User).filter(User.email == email).first()
+
+    # Clean up old unverified accounts older than 1 hour
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    db.query(User).filter(User.email_verified == False, User.created_at < cutoff).delete()
+    db.commit()
+
+    if existing:
+        if existing.email_verified:
+            return RedirectResponse("/register?error=exists", status_code=302)
+        # Unverified — offer resend
+        return RedirectResponse(f"/register?error=unverified&email={email}", status_code=302)
 
     token = secrets.token_urlsafe(32)
     user = User(
@@ -1001,7 +1018,7 @@ def register(email: str = Form(...), password: str = Form(...), db: Session = De
         plan="free",
         email_verified=False,
         verification_token=token,
-        verification_expires=datetime.utcnow() + timedelta(hours=24),
+        verification_expires=datetime.utcnow() + timedelta(hours=1),
     )
     db.add(user)
     db.commit()
@@ -1009,7 +1026,7 @@ def register(email: str = Form(...), password: str = Form(...), db: Session = De
     # Send verification email via Resend
     api_key = os.getenv("RESEND_API_KEY")
     from_email = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
-    base_url = os.getenv("BASE_URL", "https://expirely-5pkx.onrender.com")
+    base_url = os.getenv("BASE_URL", "https://nutify.co.uk")
     verify_url = f"{base_url}/verify?token={token}"
 
     if api_key:
@@ -1033,6 +1050,38 @@ def register(email: str = Form(...), password: str = Form(...), db: Session = De
     else:
         print(f"VERIFICATION LINK: {verify_url}")
 
+    return RedirectResponse("/verify-sent", status_code=302)
+
+
+@app.get("/resend-verification")
+def resend_verification(email: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email.strip().lower(), User.email_verified == False).first()
+    if not user:
+        return RedirectResponse("/register?error=notfound", status_code=302)
+    token = secrets.token_urlsafe(32)
+    user.verification_token = token
+    user.verification_expires = datetime.utcnow() + timedelta(hours=1)
+    db.commit()
+    api_key = os.getenv("RESEND_API_KEY")
+    from_email = os.getenv("FROM_EMAIL", "onboarding@resend.dev")
+    base_url = os.getenv("BASE_URL", "https://nutify.co.uk")
+    verify_url = f"{base_url}/verify?token={token}"
+    if api_key:
+        try:
+            import requests
+            requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "from": from_email,
+                    "to": [user.email],
+                    "subject": "Verify your Nutify account",
+                    "html": f"<p>Click to verify: <a href='{verify_url}'>Verify email</a></p>",
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"Resend failed: {e}")
     return RedirectResponse("/verify-sent", status_code=302)
 
 
