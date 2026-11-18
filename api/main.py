@@ -1521,6 +1521,7 @@ def upgrade_page(request: Request, db: Session = Depends(get_db)):
         <li>Unlimited push + email reminders</li>
         <li>Unlimited groups</li>
         <li>Custom calendar icons</li>
+        <li>Unlimited recurring reminders</li>
       </ul>
       <p><strong>Monthly</strong> £0.89 / month</p>
       <button onclick="alert('Google Play billing ready — connect later')">Subscribe monthly</button>
@@ -2275,6 +2276,7 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
               <li>Unlimited reminders</li>
               <li>Email + push notifications</li>
               <li>Custom calendar icons</li>
+        <li>Unlimited recurring reminders</li>
               <li>Unlimited groups</li>
             </ul>
             <button onclick="alert('Google Play billing placeholder')">Upgrade now</button>
@@ -2350,6 +2352,52 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
 
         <label>Expiry date <span class="req">*</span></label>
         <input name="expiry_date" type="date" value="{safe_expiry}" required>
+
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;margin:12px 0;">
+          <input type="checkbox" name="recurring" id="recurringCheck" value="true" style="width:auto;margin:0;" onchange="document.getElementById('recurringOptions').style.display=this.checked?'block':'none'">
+          Make this a recurring reminder
+        </label>
+        <div id="recurringOptions" style="display:none;background:#fff7ed;padding:12px;border-radius:8px;margin-bottom:12px;">
+          <label>Frequency</label>
+          <select name="recurrence_type" id="recType" onchange="updateRecurrenceFields()">
+            <option value="weekly">Weekly</option>
+            <option value="fortnightly">Fortnightly</option>
+            <option value="4weekly">Every 4 weeks</option>
+            <option value="monthly">Monthly</option>
+            <option value="named_day">Named day</option>
+            <option value="specific_date">Specific date</option>
+          </select>
+          <div id="recDayField">
+            <label>Day</label>
+            <select name="recurrence_day">
+              <option value="monday">Monday</option>
+              <option value="tuesday">Tuesday</option>
+              <option value="wednesday">Wednesday</option>
+              <option value="thursday">Thursday</option>
+              <option value="friday">Friday</option>
+              <option value="saturday">Saturday</option>
+              <option value="sunday">Sunday</option>
+            </select>
+          </div>
+          <div id="recDateField" style="display:none;">
+            <label>Start / pattern date</label>
+            <input name="recurrence_date" type="date">
+          </div>
+          <div id="namedDayField" style="display:none;">
+            <label>Which</label>
+            <select name="named_position">
+              <option value="first">First</option>
+              <option value="second">Second</option>
+              <option value="third">Third</option>
+              <option value="fourth">Fourth</option>
+              <option value="last">Last</option>
+            </select>
+            <select name="named_day">
+              <option value="monday">Monday</option>
+              <option value="friday">Friday</option>
+            </select>
+          </div>
+        </div>
 
         <label>Remind me this many days before <span class="req">*</span></label>
         <input name="reminder_days" type="number" value="30" min="1" max="365" required>
@@ -2434,6 +2482,15 @@ async def create_document(request: Request, db: Session = Depends(get_db)):
         count = db.query(Document).filter(Document.user_id == user.id).count()
         if count >= 3:
             return RedirectResponse("/add?limit=1", status_code=302)
+        # Recurring counts as 1, but free limited to 1 recurring
+        if form.get("recurring") == "true":
+            recurring_count = 0
+            for d in db.query(Document).filter(Document.user_id == user.id).all():
+                extra = parse_extra(d)
+                if extra.get("recurring"):
+                    recurring_count += 1
+            if recurring_count >= 1:
+                return RedirectResponse("/add?limit=1", status_code=302)
     form = await request.form()
 
     name = (form.get("name") or "").strip()
@@ -2465,6 +2522,13 @@ async def create_document(request: Request, db: Session = Depends(get_db)):
             val = form.get(key)
             if val is not None and val != "":
                 extra[field] = True if val == "true" else val
+    if form.get("recurring") == "true":
+        extra["recurring"] = True
+        extra["recurrence_type"] = form.get("recurrence_type") or "weekly"
+        extra["recurrence_day"] = form.get("recurrence_day") or ""
+        extra["recurrence_date"] = form.get("recurrence_date") or ""
+        extra["named_position"] = form.get("named_position") or ""
+        extra["named_day"] = form.get("named_day") or ""
 
     doc = Document(
         user_id=user.id,
