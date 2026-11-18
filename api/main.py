@@ -1091,7 +1091,8 @@ def verify_sent():
     <div class="card" style="text-align:center;">
       <h2>Check your email</h2>
       <p>We've sent a verification link. Click it to activate your account.</p>
-      <p class="hint">If you don't see it, check spam. The link expires in 24 hours.</p>
+      <p class="hint">If you don't see it, check spam. The link expires in 1 hour.</p>
+      <p style="margin-top:16px;"><a href="/register">Back to register</a> (you can resend or try again after 1 hour)</p>
     </div>
     """
     return page("Verify email", body)
