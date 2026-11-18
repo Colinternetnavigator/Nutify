@@ -872,6 +872,7 @@ def page(title: str, body: str, user: Optional[User] = None, show_fab: bool = Fa
           {upgrade_link}
           <a href="/account">👤 My Account</a>
           <a href="/about">ℹ️ About</a>
+          <a href="/faq">❓ FAQ & Contact</a>
           <a href="/logout">🚪 Logout</a>
         </div>
         '''
@@ -1476,6 +1477,64 @@ async def add_from_doc(request: Request, file: UploadFile = File(...), db: Sessi
     db.commit()
 
     return RedirectResponse(f"/add?prefill_from={file_id}", status_code=302)
+
+
+
+@app.get("/faq", response_class=HTMLResponse)
+def faq_page(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    body = """
+    <div class="card" style="text-align:center;">
+      <img src="/static/ScoutClose.png" alt="Scout" style="max-width:160px;margin-bottom:12px;" onerror="this.style.display='none'">
+      <h2>FAQ & Contact</h2>
+      <p>Questions? Email us at <a href="mailto:support@nutify.co.uk">support@nutify.co.uk</a></p>
+    </div>
+    <div class="card">
+      <h3>Frequently asked questions</h3>
+      <details style="margin:10px 0;"><summary><strong>What is Nutify?</strong></summary><p>Nutify helps you keep track of important documents and renewal dates — passports, insurance, MOTs, subscriptions and more — and reminds you before they expire.</p></details>
+      <details style="margin:10px 0;"><summary><strong>Is my data secure?</strong></summary><p>Yes. Your documents and details are stored securely and only accessible by you (and anyone you choose to share a group with).</p></details>
+      <details style="margin:10px 0;"><summary><strong>What’s the difference between Free and Unlimited?</strong></summary><p>Free includes 3 reminders, 2 groups, and 1 recurring reminder. Unlimited removes those limits and adds email notifications and custom calendar icons.</p></details>
+      <details style="margin:10px 0;"><summary><strong>How do reminders work?</strong></summary><p>You set an expiry date and how many days before you want to be notified. Nutify sends a push notification (and email on Unlimited) when the time comes.</p></details>
+      <details style="margin:10px 0;"><summary><strong>Can I share reminders with family?</strong></summary><p>Yes. Create a group and share it by email so others can see the items in that group.</p></details>
+      <details style="margin:10px 0;"><summary><strong>What if I miss a reminder?</strong></summary><p>Expired items stay visible and are highlighted. You can mark one as done and create a new reminder for the next expiry.</p></details>
+      <details style="margin:10px 0;"><summary><strong>Can I upload documents?</strong></summary><p>Yes. You can upload policies, passports, licences and more, then view or download them later from My Documents.</p></details>
+      <details style="margin:10px 0;"><summary><strong>How do I cancel Unlimited?</strong></summary><p>Once billing is connected you’ll be able to manage or cancel your subscription from the Account page.</p></details>
+    </div>
+    <div class="card">
+      <h3>Contact us</h3>
+      <form method="post" action="/contact">
+        <label>Your email</label>
+        <input name="email" type="email" required>
+        <label>Message</label>
+        <textarea name="message" rows="5" required></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </div>
+    """
+    return page("FAQ & Contact", body, user)
+
+@app.post("/contact")
+def contact(email: str = Form(...), message: str = Form(...), db: Session = Depends(get_db)):
+    api_key = os.getenv("RESEND_API_KEY")
+    from_email = os.getenv("FROM_EMAIL", "noreply@nutify.co.uk")
+    if api_key:
+        try:
+            import requests
+            requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "from": from_email,
+                    "to": ["support@nutify.co.uk"],
+                    "reply_to": email,
+                    "subject": "Nutify contact form",
+                    "html": f"<p>From: {html.escape(email)}</p><p>{html.escape(message)}</p>",
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            print(f"Contact email failed: {e}")
+    return RedirectResponse("/faq?sent=1", status_code=302)
 
 
 @app.get("/about", response_class=HTMLResponse)
