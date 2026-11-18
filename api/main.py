@@ -2358,45 +2358,16 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
           Make this a recurring reminder
         </label>
         <div id="recurringOptions" style="display:none;background:#fff7ed;padding:12px;border-radius:8px;margin-bottom:12px;">
-          <label>Frequency</label>
+          <label>How often</label>
           <select name="recurrence_type" id="recType" onchange="updateRecurrenceFields()">
             <option value="weekly">Weekly</option>
             <option value="fortnightly">Fortnightly</option>
             <option value="4weekly">Every 4 weeks</option>
-            <option value="monthly">Monthly</option>
             <option value="named_day">Named day</option>
             <option value="specific_date">Specific date</option>
+            <option value="last_working_day">Last working day of the month</option>
           </select>
-          <div id="recDayField">
-            <label>Day</label>
-            <select name="recurrence_day">
-              <option value="monday">Monday</option>
-              <option value="tuesday">Tuesday</option>
-              <option value="wednesday">Wednesday</option>
-              <option value="thursday">Thursday</option>
-              <option value="friday">Friday</option>
-              <option value="saturday">Saturday</option>
-              <option value="sunday">Sunday</option>
-            </select>
-          </div>
-          <div id="recDateField" style="display:none;">
-            <label>Start / pattern date</label>
-            <input name="recurrence_date" type="date">
-          </div>
-          <div id="namedDayField" style="display:none;">
-            <label>Which</label>
-            <select name="named_position">
-              <option value="first">First</option>
-              <option value="second">Second</option>
-              <option value="third">Third</option>
-              <option value="fourth">Fourth</option>
-              <option value="last">Last</option>
-            </select>
-            <select name="named_day">
-              <option value="monday">Monday</option>
-              <option value="friday">Friday</option>
-            </select>
-          </div>
+          <div id="secondBox"></div>
         </div>
 
         <label>Remind me this many days before <span class="req">*</span></label>
@@ -2439,6 +2410,26 @@ def add_page(request: Request, db: Session = Depends(get_db), prefill_from: str 
       registration: {json.dumps(registration)}
     }};
 
+    function updateRecurrenceFields() {{
+      const t = document.getElementById('recType').value;
+      const box = document.getElementById('secondBox');
+      const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+      if (t === 'weekly') {{
+        box.innerHTML = '<label>Day of the week</label><select name="recurrence_day">' +
+          days.map(d => '<option value="' + d.toLowerCase() + '">' + d + '</option>').join('') + '</select>';
+      }} else if (t === 'fortnightly' || t === '4weekly' || t === 'specific_date') {{
+        box.innerHTML = '<label>Pattern / start date</label><input name="recurrence_date" type="date">';
+      }} else if (t === 'named_day') {{
+        const positions = ['First','Second','Third','Fourth','Last'];
+        let opts = '';
+        positions.forEach(p => days.forEach(d => {{
+          opts += '<option value="' + p.toLowerCase() + '_' + d.toLowerCase() + '">' + p + ' ' + d + '</option>';
+        }}));
+        box.innerHTML = '<label>Which day</label><select name="named_day">' + opts + '</select>';
+      }} else {{
+        box.innerHTML = '';
+      }}
+    }}
     function updateExtraFields() {{
       const t = document.getElementById('docType').value;
       const fields = TYPE_FIELDS[t] || [];
